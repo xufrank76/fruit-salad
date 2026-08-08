@@ -5,8 +5,4 @@ export const TRACK = {
   audioUrl:
     "/Justin%20Bieber%20-%20Beauty%20And%20A%20Beat%20ft.%20Nicki%20Minaj%20(Official%20Audio)%20ft.%20Nicki%20Minaj%20-%20Justin%20Bieber%20(128k).mp3",
   lyricsUrl: "/beautyandabeat.txt",
-  // Real downbeat grid (from scripts/detect-bars.py). Optional: if the file is
-  // absent, the app falls back to in-browser beat detection.
-  barsUrl: "/beautyandabeat.bars.json",
-  bpm: 128, // fallback tempo for the metronome when no bars file / detection
 };

@@ -7,19 +7,12 @@ import {
   getAudioContext,
   loadAudioBuffer,
 } from "@/lib/audio";
-import {
-  barBeats,
-  countInForLine,
-  loadBars,
-  type BarsData,
-} from "@/lib/bars";
-import { detectBeat, type BeatInfo } from "@/lib/beat";
 import { loadLyrics, type LyricLine } from "@/lib/lyrics";
 import { TRACK } from "@/lib/track";
 import LyricsPanel from "./LyricsPanel";
 
-const COUNT_IN_BEATS = 4; // fallback count-in length when there's no bars file
 const RECORD_SONG_GAIN = 0.35; // duck the backing track while you sing over it
+const FALLBACK_LEAD_IN_SEC = 2; // pre-roll when the chosen line has no previous line
 
 type RecordingState = "idle" | "recording" | "hasRecording";
 type CueKind = "wait" | "countin" | "sing" | "done";
@@ -29,26 +22,6 @@ function formatTime(sec: number): string {
   const m = Math.floor(sec / 60);
   const s = Math.floor(sec % 60);
   return `${m}:${String(s).padStart(2, "0")}`;
-}
-
-// A short metronome tick scheduled on the AudioContext clock. `accent` marks
-// the downbeat where the singer should come in.
-function scheduleClick(
-  ctx: AudioContext,
-  destination: AudioNode,
-  time: number,
-  accent: boolean
-) {
-  const osc = ctx.createOscillator();
-  const gain = ctx.createGain();
-  osc.frequency.value = accent ? 1600 : 900;
-  gain.gain.setValueAtTime(0.0001, time);
-  gain.gain.exponentialRampToValueAtTime(accent ? 0.6 : 0.32, time + 0.001);
-  gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.06);
-  osc.connect(gain).connect(destination);
-  osc.start(time);
-  osc.stop(time + 0.07);
-  return osc;
 }
 
 export default function SongPage() {
@@ -61,15 +34,10 @@ export default function SongPage() {
   const [recordingState, setRecordingState] = useState<RecordingState>("idle");
   const [micError, setMicError] = useState<string | null>(null);
   const [selectedLines, setSelectedLines] = useState<Set<number>>(new Set());
-  const [metronomeWhileSinging, setMetronomeWhileSinging] = useState(true);
   const [cueLabel, setCueLabel] = useState("");
   const [cueKind, setCueKind] = useState<CueKind>("wait");
-  const [beat, setBeat] = useState<BeatInfo | null>(null);
-  const [bars, setBars] = useState<BarsData | null>(null);
 
   const songBufferRef = useRef<AudioBuffer | null>(null);
-  const beatRef = useRef<BeatInfo | null>(null);
-  const barsRef = useRef<BarsData | null>(null);
   const recordedBufferRef = useRef<AudioBuffer | null>(null);
   const recordStartSecRef = useRef(0);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -81,27 +49,18 @@ export default function SongPage() {
 
   useEffect(() => {
     loadLyrics(TRACK.lyricsUrl).then(setLyrics);
-    loadBars(TRACK.barsUrl).then((b) => {
-      barsRef.current = b;
-      setBars(b);
-    });
   }, []);
 
-  // Decode the track up front and detect its beat grid so the metronome can
-  // lock to the real beats. Kept in a ref for scheduling, plus state for UI.
+  // Decode the track up front so recording/playback don't stall on first use.
   useEffect(() => {
     let cancelled = false;
     const ctx = getAudioContext();
     loadAudioBuffer(ctx, TRACK.audioUrl)
       .then((buf) => {
-        if (cancelled) return;
-        songBufferRef.current = buf;
-        const info = detectBeat(buf);
-        beatRef.current = info;
-        setBeat(info);
+        if (!cancelled) songBufferRef.current = buf;
       })
       .catch(() => {
-        /* falls back to TRACK.bpm below */
+        /* loaded lazily on first record instead */
       });
     return () => {
       cancelled = true;
@@ -206,39 +165,15 @@ export default function SongPage() {
     const lineStartSec = lineTimes[startIdx].start;
     const endSec = lineTimes[endIdx].end;
 
-    // Plan the count-in. Preferred path: a real bar grid (madmom → bars.json),
-    // which puts the count-in on an actual downbeat. Fallback: the in-browser
-    // beat detector, which gets tempo/beat but not the true "1".
-    let recordFromSec: number;
-    let comeInSec: number;
-    let countdownBeatSec: number;
-    let beatClicks: { songSec: number; accent: boolean }[];
-
-    const barsData = barsRef.current;
-    if (barsData && barsData.bars.length > 0) {
-      const ci = countInForLine(lineStartSec, barsData);
-      recordFromSec = ci.countInStartSec;
-      comeInSec = ci.entranceSec;
-      countdownBeatSec = ci.beatSec;
-      beatClicks = barBeats(barsData, recordFromSec, endSec);
-    } else {
-      const info = beatRef.current;
-      const beatSec = info?.beatSec ?? 60 / TRACK.bpm;
-      const beatOffsetSec = info?.offsetSec ?? 0;
-      const comeInIdx = Math.round((lineStartSec - beatOffsetSec) / beatSec);
-      comeInSec = beatOffsetSec + comeInIdx * beatSec;
-      recordFromSec = Math.max(0, comeInSec - COUNT_IN_BEATS * beatSec);
-      countdownBeatSec = beatSec;
-      const firstBeatIdx = Math.ceil((recordFromSec - beatOffsetSec) / beatSec);
-      const lastBeatIdx = Math.floor((endSec - beatOffsetSec) / beatSec);
-      beatClicks = [];
-      for (let n = firstBeatIdx; n <= lastBeatIdx; n++) {
-        beatClicks.push({
-          songSec: beatOffsetSec + n * beatSec,
-          accent: n === comeInIdx,
-        });
-      }
-    }
+    // Pre-roll: start playback at the previous line so there's a natural
+    // lead-in (you hear how the song flows into your line), then come in
+    // exactly where the chosen line starts.
+    const prevIdx = startIdx - 1;
+    const recordFromSec =
+      prevIdx >= 0
+        ? lineTimes[prevIdx].start
+        : Math.max(0, lineStartSec - FALLBACK_LEAD_IN_SEC);
+    const comeInSec = lineStartSec;
 
     const ctx = getAudioContext();
     if (!songBufferRef.current) {
@@ -277,22 +212,6 @@ export default function SongPage() {
     songSource.start(startAt, recordFromSec);
     songSource.stop(endAt + 0.1);
     activeSourcesRef.current.push(songSource);
-
-    // Metronome: a click on every beat in the window, accenting downbeats.
-    // Count-in beats (before the entrance) always play; the beats during the
-    // line respect the toggle.
-    const clickBus = ctx.createGain();
-    clickBus.gain.value = 1;
-    clickBus.connect(ctx.destination);
-    for (const { songSec, accent } of beatClicks) {
-      const beatCtxTime = startAt + (songSec - recordFromSec);
-      if (beatCtxTime < ctx.currentTime) continue;
-      const duringLine = songSec > comeInSec + 1e-6;
-      if (duringLine && !metronomeWhileSinging) continue;
-      activeSourcesRef.current.push(
-        scheduleClick(ctx, clickBus, beatCtxTime, accent)
-      );
-    }
 
     const mediaRecorder = new MediaRecorder(stream);
     const chunks: BlobPart[] = [];
@@ -339,12 +258,9 @@ export default function SongPage() {
         setCueKind("wait");
         setCueLabel("Get ready");
       } else if (pos < comeInSec) {
-        const beatsLeft = Math.max(
-          1,
-          Math.ceil((comeInSec - pos) / countdownBeatSec)
-        );
+        const secsLeft = Math.max(1, Math.ceil(comeInSec - pos));
         setCueKind("countin");
-        setCueLabel(String(beatsLeft));
+        setCueLabel(String(secsLeft));
       } else if (pos < endSec) {
         setCueKind("sing");
         setCueLabel("Sing!");
@@ -357,7 +273,7 @@ export default function SongPage() {
       }
     };
     rafRef.current = requestAnimationFrame(tick);
-  }, [selectedLines, lineTimes, metronomeWhileSinging, stopAllSources]);
+  }, [selectedLines, lineTimes, stopAllSources]);
 
   const stopRecording = useCallback(() => {
     if (autoStopTimeoutRef.current) {
@@ -460,10 +376,11 @@ export default function SongPage() {
 
       <div className="w-full max-w-md space-y-3 rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
         <p className="text-xs text-zinc-500 dark:text-zinc-400">
-          Tap lines above to pick which ones to sing, then record &mdash; the
-          track seeks to exactly where those lines start
-          {hasTimestamps ? "" : " (approx: this song has no synced timing yet)"}.
-          Playback layers your take back on the track to check the sync.
+          Tap lines above to pick which ones to sing, then record &mdash;
+          playback starts at the previous line for a natural lead-in
+          {hasTimestamps ? "" : " (approx: this song has no synced timing yet)"},
+          then it&apos;s your turn. Playback layers your take back on the
+          track to check the sync.
         </p>
 
         <div className="flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400">
@@ -481,22 +398,6 @@ export default function SongPage() {
             </button>
           )}
         </div>
-
-        <label className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
-          <input
-            type="checkbox"
-            checked={metronomeWhileSinging}
-            onChange={(e) => setMetronomeWhileSinging(e.target.checked)}
-            disabled={recordingState === "recording"}
-            className="h-3.5 w-3.5"
-          />
-          Metronome while singing (a one-bar count-in always plays)
-          {bars
-            ? ` · bar-accurate downbeats (${bars.bars.length} bars)`
-            : beat
-              ? ` · ~${Math.round(beat.bpm)} BPM, on-beat grid (no downbeat file)`
-              : " · detecting beat…"}
-        </label>
 
         {micError && (
           <p className="text-xs text-red-600 dark:text-red-400">{micError}</p>
