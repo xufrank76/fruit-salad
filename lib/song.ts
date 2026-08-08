@@ -1,4 +1,7 @@
-// Must match scripts/generate-instrumental.mjs output (logged at generation time).
+// To test with a real song: drop the file in public/, point `url` at it,
+// and set startMs/endMs to a line you want to sing (listen to the track and
+// note where a phrase starts/ends). startMs must be >= countInMs or the
+// count-in has nowhere to play from.
 export const SONG = {
   url: "/instrumental.wav",
   line: {
