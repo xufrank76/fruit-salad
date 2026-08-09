@@ -3,9 +3,11 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  blobToAudioBuffer,
   getAudioContext,
   loadAudioBuffer,
+  sliceCaptureToBuffer,
+  startMicCapture,
+  type MicCapture,
 } from "@/lib/audio";
 import { loadLyrics, type LyricLine } from "@/lib/lyrics";
 import { TRACK } from "@/lib/track";
@@ -40,7 +42,11 @@ export default function SongPage() {
   const songBufferRef = useRef<AudioBuffer | null>(null);
   const recordedBufferRef = useRef<AudioBuffer | null>(null);
   const recordStartSecRef = useRef(0);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const micCaptureRef = useRef<MicCapture | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const recordWindowRef = useRef<{ startAt: number; endAt: number } | null>(
+    null
+  );
   const activeSourcesRef = useRef<AudioScheduledSourceNode[]>([]);
   const rafRef = useRef<number | null>(null);
   const autoStopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
@@ -69,7 +75,8 @@ export default function SongPage() {
 
   useEffect(() => {
     return () => {
-      mediaRecorderRef.current?.stop();
+      micCaptureRef.current?.stop();
+      micStreamRef.current?.getTracks().forEach((t) => t.stop());
       if (autoStopTimeoutRef.current) clearTimeout(autoStopTimeoutRef.current);
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       for (const src of activeSourcesRef.current) {
@@ -153,6 +160,46 @@ export default function SongPage() {
     activeSourcesRef.current = [];
   }, []);
 
+  // Ends capture (auto-stop timer or manual Stop) and slices the exact
+  // recorded window out of the continuously-captured mic samples.
+  const finishRecording = useCallback(() => {
+    if (autoStopTimeoutRef.current) {
+      clearTimeout(autoStopTimeoutRef.current);
+      autoStopTimeoutRef.current = null;
+    }
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    setCueKind("wait");
+    setCueLabel("");
+
+    const capture = micCaptureRef.current;
+    const stream = micStreamRef.current;
+    const window = recordWindowRef.current;
+    micCaptureRef.current = null;
+    micStreamRef.current = null;
+    recordWindowRef.current = null;
+    stream?.getTracks().forEach((t) => t.stop());
+
+    if (!capture || !window) {
+      setRecordingState("idle");
+      return;
+    }
+
+    const ctx = getAudioContext();
+    try {
+      const raw = capture.stop();
+      recordedBufferRef.current = sliceCaptureToBuffer(
+        ctx,
+        raw,
+        window.startAt,
+        window.endAt
+      );
+      setRecordingState("hasRecording");
+    } catch (e) {
+      setMicError("Could not process recording: " + String(e));
+      setRecordingState("idle");
+    }
+  }, []);
+
   const startRecording = useCallback(async () => {
     if (selectedLines.size === 0 || lineTimes.length === 0) return;
     setMicError(null);
@@ -213,40 +260,22 @@ export default function SongPage() {
     songSource.stop(endAt + 0.1);
     activeSourcesRef.current.push(songSource);
 
-    const mediaRecorder = new MediaRecorder(stream);
-    const chunks: BlobPart[] = [];
-    mediaRecorder.ondataavailable = (e) => {
-      if (e.data.size > 0) chunks.push(e.data);
-    };
-    mediaRecorder.onstop = async () => {
-      stream.getTracks().forEach((t) => t.stop());
-      if (autoStopTimeoutRef.current) {
-        clearTimeout(autoStopTimeoutRef.current);
-        autoStopTimeoutRef.current = null;
-      }
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-      setCueKind("wait");
-      setCueLabel("");
-      const blob = new Blob(chunks, { type: mediaRecorder.mimeType });
-      try {
-        recordedBufferRef.current = await blobToAudioBuffer(ctx, blob);
-        setRecordingState("hasRecording");
-      } catch (e) {
-        setMicError("Could not decode recording: " + String(e));
-        setRecordingState("idle");
-      }
-    };
+    // Capture mic audio continuously on this same AudioContext clock (see
+    // lib/audio.ts) rather than timing a MediaRecorder start — that's what
+    // makes the recorded voice land exactly on the song position it was sung
+    // at, with no drift-prone "when did recording actually begin" guess.
+    const capture = startMicCapture(ctx, stream);
+    micCaptureRef.current = capture;
+    micStreamRef.current = stream;
+    recordWindowRef.current = { startAt, endAt };
 
-    mediaRecorderRef.current = mediaRecorder;
-    const leadMs = (startAt - ctx.currentTime) * 1000;
-    setTimeout(() => mediaRecorder.start(), leadMs);
     setRecordingState("recording");
     setCueKind("wait");
     setCueLabel("Get ready");
 
     autoStopTimeoutRef.current = setTimeout(
-      () => mediaRecorderRef.current?.stop(),
-      leadMs + (endSec - recordFromSec) * 1000
+      finishRecording,
+      Math.max(0, (endAt - ctx.currentTime) * 1000) + 150
     );
 
     // Visual cue + lyric scroll, driven off the audio clock so it can't drift
@@ -273,19 +302,12 @@ export default function SongPage() {
       }
     };
     rafRef.current = requestAnimationFrame(tick);
-  }, [selectedLines, lineTimes, stopAllSources]);
+  }, [selectedLines, lineTimes, stopAllSources, finishRecording]);
 
   const stopRecording = useCallback(() => {
-    if (autoStopTimeoutRef.current) {
-      clearTimeout(autoStopTimeoutRef.current);
-      autoStopTimeoutRef.current = null;
-    }
-    if (rafRef.current) cancelAnimationFrame(rafRef.current);
     stopAllSources();
-    setCueKind("wait");
-    setCueLabel("");
-    mediaRecorderRef.current?.stop();
-  }, [stopAllSources]);
+    finishRecording();
+  }, [stopAllSources, finishRecording]);
 
   const playBack = useCallback(() => {
     const ctx = getAudioContext();
