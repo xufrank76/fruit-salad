@@ -4,6 +4,7 @@ import AlbumCarousel from "./AlbumCarousel";
 import { fetchAlbumArtwork } from "@/lib/itunes";
 import { mockCompletionFor, OTHER_TRACKS, TRACK } from "@/lib/track";
 import { CANVAS_HEIGHT, CANVAS_WIDTH, cover } from "../coverUnit";
+import FruitField from "../FruitField";
 
 export default async function SaladPage() {
   // Licensed-for-display artwork via Apple's iTunes Search API (lib/itunes.ts)
@@ -42,6 +43,12 @@ export default async function SaladPage() {
         className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
         style={{ width: CANVAS_WIDTH, height: CANVAS_HEIGHT }}
       >
+        {/* Same decorative field as the homepage, dimmed so it stays
+            background texture instead of competing with this page's content. */}
+        <div className="opacity-10">
+          <FruitField />
+        </div>
+
         <div
           className="font-display absolute flex items-end"
           style={{ left: cover(11), top: cover(20), gap: cover(64) }}

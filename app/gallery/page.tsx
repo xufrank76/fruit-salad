@@ -1,6 +1,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import { CANVAS_HEIGHT, CANVAS_WIDTH, cover } from "../coverUnit";
+import FruitField from "../FruitField";
 
 // No renditions/gallery data exists yet (see README's `renditions` table —
 // nothing writes to it until a song's lines are fully sung and assembled).
@@ -13,6 +14,12 @@ export default function GalleryPage() {
         className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
         style={{ width: CANVAS_WIDTH, height: CANVAS_HEIGHT }}
       >
+        {/* Same decorative field as the homepage, dimmed so it stays
+            background texture instead of competing with this page's content. */}
+        <div className="opacity-10">
+          <FruitField />
+        </div>
+
         <div
           className="font-display absolute flex items-end"
           style={{ left: cover(11), top: cover(20), gap: cover(64) }}

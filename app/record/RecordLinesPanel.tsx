@@ -10,6 +10,7 @@ export default function RecordLinesPanel({
   takenBy,
   selectedIndices,
   onToggleLine,
+  onSeekLine,
   disabled,
 }: {
   lines: string[];
@@ -18,6 +19,7 @@ export default function RecordLinesPanel({
   takenBy: Record<number, string>;
   selectedIndices: Set<number>;
   onToggleLine: (index: number) => void;
+  onSeekLine?: (index: number) => void;
   disabled: boolean;
 }) {
   const activeRef = useRef<HTMLDivElement>(null);
@@ -47,7 +49,10 @@ export default function RecordLinesPanel({
               className="flex items-center justify-between gap-3 rounded px-2 py-1"
             >
               <p
+                onClick={() => onSeekLine?.(i)}
                 className={`font-display min-w-0 flex-1 truncate ${
+                  onSeekLine ? "cursor-pointer hover:text-white" : ""
+                } ${
                   i === currentIndex
                     ? "text-base font-semibold text-white"
                     : "text-base text-red-200/50"

@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   getAudioContext,
+  getOutputLatencySec,
   loadAudioBuffer,
   sliceCaptureToBuffer,
   startMicCapture,
@@ -14,12 +15,14 @@ import {
 import { loadLyrics, type LyricLine } from "@/lib/lyrics";
 import { TRACK } from "@/lib/track";
 import { CANVAS_HEIGHT, CANVAS_WIDTH, cover } from "../coverUnit";
+import FruitField from "../FruitField";
 import RecordLinesPanel from "./RecordLinesPanel";
 import SproutingFruits, { randomFruit, type SproutedFruit } from "./SproutingFruits";
 
 const RECORD_SONG_GAIN = 0.35; // duck the backing track while you sing over it
 const MIN_LEAD_IN_SEC = 2; // guaranteed minimum pre-roll
-const TAIL_PADDING_SEC = 0.6; // buffer past the next line's timestamp
+const TAIL_PADDING_SEC = 1.5; // buffer past the next line's timestamp — singers lag the reference vocal
+const AUTO_STOP_SAFETY_MS = 400; // extra margin so the stop timer never fires before the window ends
 const WAVE_BARS = 14;
 
 // "idle" covers both the empty prompt and the pre-record "ready" view — which
@@ -159,6 +162,16 @@ export default function RecordPage() {
     return idx;
   }, [lineTimes, currentTime]);
 
+  const seekToLine = useCallback(
+    (index: number) => {
+      const audio = audioRef.current;
+      const time = lineTimes[index];
+      if (!audio || !time) return;
+      audio.currentTime = time.start;
+    },
+    [lineTimes]
+  );
+
   const selectedList = useMemo(
     () => [...selectedIndices].sort((a, b) => a - b),
     [selectedIndices]
@@ -272,7 +285,7 @@ export default function RecordPage() {
 
     autoStopTimeoutRef.current = setTimeout(
       finishRecording,
-      Math.max(0, (endAt - ctx.currentTime) * 1000) + 150
+      Math.max(0, (endAt - ctx.currentTime) * 1000) + AUTO_STOP_SAFETY_MS
     );
 
     // The 3-2-1 count-in runs DURING the pickup pre-roll (song already playing,
@@ -343,8 +356,16 @@ export default function RecordPage() {
     // Skip the pickup pre-roll on playback: start the song at the line, and
     // offset into the voice buffer by the same amount (the buffer starts at
     // recordFromSec). The take then plays only from where you actually sang.
+    // The voice buffer was captured on the raw AudioContext clock, but the
+    // singer reacted to what they *heard* — which lagged that clock by the
+    // device's output latency — so their singing actually lands this much
+    // later in the capture than a naive offset assumes.
     const lineStartSec = lineStartSecRef.current;
-    const voiceOffset = Math.max(0, lineStartSec - recordFromSecRef.current);
+    const outputLatency = getOutputLatencySec(ctx);
+    const voiceOffset = Math.max(
+      0,
+      lineStartSec - recordFromSecRef.current + outputLatency
+    );
     const playDur = Math.max(0.1, voiceBuffer.duration - voiceOffset);
     const endAt = startAt + playDur;
 
@@ -430,6 +451,12 @@ export default function RecordPage() {
         className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
         style={{ width: CANVAS_WIDTH, height: CANVAS_HEIGHT }}
       >
+        {/* Same decorative field as the homepage, dimmed so it stays
+            background texture instead of competing with this page's content. */}
+        <div className="opacity-10">
+          <FruitField />
+        </div>
+
         <SproutingFruits fruits={bgFruits} />
 
         <div
@@ -485,6 +512,7 @@ export default function RecordPage() {
             takenBy={takenBy}
             selectedIndices={selectedIndices}
             onToggleLine={toggleLine}
+            onSeekLine={seekToLine}
             disabled={panelState !== "idle"}
           />
         </div>

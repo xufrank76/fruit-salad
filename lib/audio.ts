@@ -59,6 +59,16 @@ export function computeNormalizationGain(
   return Math.min(targetRms / rms, maxGain);
 }
 
+// Output latency (speaker/headphone + OS mixing delay) between scheduling
+// audio at a given AudioContext time and it actually being audible. The mic
+// captures on the raw context clock with no such delay, so anything the user
+// sings *in response to what they hear* lands this many seconds later than
+// the nominal schedule — callers mapping a captured take onto the song's
+// timeline need to add it back in, or the take will be sliced too early.
+export function getOutputLatencySec(ctx: AudioContext): number {
+  return ctx.outputLatency || ctx.baseLatency || 0;
+}
+
 export async function blobToAudioBuffer(
   ctx: AudioContext,
   blob: Blob
