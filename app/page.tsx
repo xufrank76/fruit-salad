@@ -1,60 +1,49 @@
 import Link from "next/link";
-
-const MODES = [
-  {
-    label: "private",
-    caption: "sing with friends",
-    href: "/song",
-  },
-  {
-    label: "public",
-    caption: "complete a song with strangers",
-    href: "#",
-  },
-  {
-    label: "gallery",
-    caption: "get serenaded by strangers idk",
-    href: "#",
-  },
-];
+import { CANVAS_HEIGHT, CANVAS_WIDTH, cover } from "./coverUnit";
+import FruitField from "./FruitField";
 
 export default function Home() {
   return (
-    <div className="relative flex flex-1 flex-col items-center justify-center gap-4 bg-zinc-50 font-sans dark:bg-black">
-      <div className="flex gap-6">
-        {MODES.map((mode) => {
-          const enabled = mode.href !== "#";
-          return (
-            <Link
-              key={mode.label}
-              href={mode.href}
-              aria-disabled={!enabled}
-              className={`flex w-36 flex-col items-center gap-2 rounded-lg border border-zinc-200 px-4 py-6 text-center dark:border-zinc-800 ${
-                enabled
-                  ? "hover:border-zinc-400 dark:hover:border-zinc-600"
-                  : "pointer-events-none opacity-40"
-              }`}
-            >
-              <span className="text-sm font-medium text-black dark:text-zinc-50">
-                {mode.label}
-              </span>
-              <span className="text-xs text-zinc-500 dark:text-zinc-400">
-                {mode.caption}
-              </span>
-            </Link>
-          );
-        })}
+    <div className="relative h-dvh w-full overflow-hidden bg-white dark:bg-black">
+      {/* Fixed 1280x832 design canvas, scaled uniformly ("cover") to fill the
+          viewport with no letterbox margins, cropping whichever axis has
+          extra scale — same treatment as the fruit bleed at the frame edges. */}
+      <div
+        className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
+        style={{ width: CANVAS_WIDTH, height: CANVAS_HEIGHT }}
+      >
+        <FruitField />
+
+        <p
+          className="font-display absolute font-medium leading-none whitespace-nowrap text-black dark:text-zinc-100"
+          style={{ left: cover(485), top: cover(374), fontSize: cover(24) }}
+        >
+          add a fruit, hear the fruit salad.
+        </p>
+
+        <Link
+          href="/salad"
+          className="font-display absolute flex items-center justify-center whitespace-nowrap border border-[rgba(253,137,2,0.2)] bg-[#ffefdc] font-normal text-black"
+          style={{
+            left: cover(514),
+            top: cover(417),
+            width: cover(247),
+            height: cover(57),
+            borderRadius: cover(20),
+            fontSize: cover(24),
+          }}
+        >
+          sing with strangers &rarr;
+        </Link>
       </div>
 
-      <Link
-        href="/sync-test"
-        className="absolute bottom-6 left-6 text-xs text-zinc-400 underline dark:text-zinc-600"
-      >
-        sync prototype
-      </Link>
-      <span className="absolute bottom-6 right-6 text-lg font-semibold text-black dark:text-zinc-50">
+      {/* Pinned to the real viewport corner, outside the cover-scaled canvas —
+          on a window shape far from 1280:832, cover crops more off the canvas
+          than any margin inside it can compensate for. This guarantees the
+          wordmark is always visible regardless of window aspect ratio. */}
+      <p className="font-display pointer-events-none absolute bottom-6 right-6 text-5xl font-medium text-black sm:text-6xl md:text-7xl lg:text-8xl dark:text-zinc-50">
         fruit salad
-      </span>
+      </p>
     </div>
   );
 }

@@ -10,6 +10,7 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+  --font-display: var(--font-neue-montreal);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -24,3 +25,57 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Hand-drawn "boil" animation for FruitField: each fruit kind swaps between
+   two redraws of itself (not a smooth tween) so it reads as wobbly stop-motion.
+   Percentage pairs hold each frame instead of interpolating between them. */
+@keyframes boil-apple {
+  0%, 45% { background-image: url("/fruit/apple.png"); }
+  50%, 95% { background-image: url("/fruit/apple-2.png"); }
+  100% { background-image: url("/fruit/apple.png"); }
+}
+@keyframes boil-blueberry {
+  0%, 45% { background-image: url("/fruit/blueberry.png"); }
+  50%, 95% { background-image: url("/fruit/blueberry-2.png"); }
+  100% { background-image: url("/fruit/blueberry.png"); }
+}
+@keyframes boil-lemon {
+  0%, 45% { background-image: url("/fruit/lemon.png"); }
+  50%, 95% { background-image: url("/fruit/lemon-2.png"); }
+  100% { background-image: url("/fruit/lemon.png"); }
+}
+@keyframes boil-orange {
+  0%, 45% { background-image: url("/fruit/orange.png"); }
+  50%, 95% { background-image: url("/fruit/orange-2.png"); }
+  100% { background-image: url("/fruit/orange.png"); }
+}
+@keyframes boil-pear {
+  0%, 45% { background-image: url("/fruit/pear.png"); }
+  50%, 95% { background-image: url("/fruit/pear-2.png"); }
+  100% { background-image: url("/fruit/pear.png"); }
+}
+
+.fruit-boil {
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: contain;
+  animation-iteration-count: infinite;
+  animation-timing-function: steps(1, end);
+}
+/* Pop-in for fruits sprouted onto the record-page background as lines are
+   contributed. Overshoot-then-settle scale, layered above the boil frame-swap
+   (see SproutingFruits.tsx) so the two animations don't collide. */
+@keyframes fruit-sprout-in {
+  0% { opacity: 0; transform: scale(0.2); }
+  65% { opacity: 1; transform: scale(1.14); }
+  100% { opacity: 1; transform: scale(1); }
+}
+.fruit-sprout {
+  animation: fruit-sprout-in 450ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.boil-apple { animation-name: boil-apple; }
+.boil-blueberry { animation-name: boil-blueberry; }
+.boil-lemon { animation-name: boil-lemon; }
+.boil-orange { animation-name: boil-orange; }
+.boil-pear { animation-name: boil-pear; }

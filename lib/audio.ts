@@ -82,7 +82,8 @@ export type MicCapture = {
 export function startMicCapture(
   ctx: AudioContext,
   stream: MediaStream,
-  bufferSize = 2048
+  bufferSize = 2048,
+  onLevel?: (rms: number) => void
 ): MicCapture {
   const source = ctx.createMediaStreamSource(stream);
   // ScriptProcessorNode is deprecated but universally supported; it only
@@ -101,7 +102,13 @@ export function startMicCapture(
       // back-date to when the first of those samples actually arrived.
       anchorCtxTime = ctx.currentTime - bufferSize / ctx.sampleRate;
     }
-    chunks.push(e.inputBuffer.getChannelData(0).slice());
+    const data = e.inputBuffer.getChannelData(0);
+    chunks.push(data.slice());
+    if (onLevel) {
+      let sumSq = 0;
+      for (let i = 0; i < data.length; i++) sumSq += data[i] * data[i];
+      onLevel(Math.sqrt(sumSq / data.length));
+    }
   };
 
   source.connect(processor);
