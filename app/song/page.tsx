@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  audioBufferToWavBlob,
   getAudioContext,
   loadAudioBuffer,
   sliceCaptureToBuffer,
@@ -19,6 +20,23 @@ const TAIL_PADDING_SEC = 0.6; // buffer past the next line's timestamp so traili
 
 type RecordingState = "idle" | "recording" | "hasRecording";
 type CueKind = "wait" | "countin" | "sing" | "done";
+
+type Take = {
+  id: string;
+  audio_url: string;
+  offset_ms: number | null;
+  duration_ms: number | null;
+  singer_name: string | null;
+};
+
+type DbLine = {
+  id: string;
+  idx: number;
+  text: string;
+  start_ms: number;
+  end_ms: number;
+  take: Take | null;
+};
 
 function formatTime(sec: number): string {
   if (!Number.isFinite(sec)) return "0:00";
@@ -40,9 +58,17 @@ export default function SongPage() {
   const [cueLabel, setCueLabel] = useState("");
   const [cueKind, setCueKind] = useState<CueKind>("wait");
 
+  const [renditionId, setRenditionId] = useState<string | null>(null);
+  const [dbLines, setDbLines] = useState<DbLine[]>([]);
+  const [singerName, setSingerName] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [justSubmitted, setJustSubmitted] = useState(false);
+
   const songBufferRef = useRef<AudioBuffer | null>(null);
   const recordedBufferRef = useRef<AudioBuffer | null>(null);
   const recordStartSecRef = useRef(0);
+  const recordedLineIndexRef = useRef<number | null>(null);
   const micCaptureRef = useRef<MicCapture | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
   const recordWindowRef = useRef<{ startAt: number; endAt: number } | null>(
@@ -56,6 +82,25 @@ export default function SongPage() {
 
   useEffect(() => {
     loadLyrics(TRACK.lyricsUrl).then(setLyrics);
+  }, []);
+
+  // Resume the one global public rendition for this song: get its id and
+  // which lines already have a take, so a refresh doesn't reset to empty.
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/renditions/${TRACK.id}`)
+      .then((res) => res.json())
+      .then((data: { renditionId: string; lines: DbLine[] }) => {
+        if (cancelled) return;
+        setRenditionId(data.renditionId);
+        setDbLines(data.lines);
+      })
+      .catch(() => {
+        /* persistence is best-effort; recording/playback still work without it */
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Decode the track up front so recording/playback don't stall on first use.
@@ -204,12 +249,15 @@ export default function SongPage() {
   const startRecording = useCallback(async () => {
     if (selectedLines.size === 0 || lineTimes.length === 0) return;
     setMicError(null);
+    setSubmitError(null);
+    setJustSubmitted(false);
     const audio = audioRef.current;
     if (!audio) return;
 
     const indices = [...selectedLines];
     const startIdx = Math.min(...indices);
     const endIdx = Math.max(...indices);
+    recordedLineIndexRef.current = startIdx;
     const lineStartSec = lineTimes[startIdx].start;
     const endSec = lineTimes[endIdx].end;
 
@@ -361,10 +409,68 @@ export default function SongPage() {
     stopAllSources();
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     recordedBufferRef.current = null;
+    recordedLineIndexRef.current = null;
+    setSubmitError(null);
+    setJustSubmitted(false);
     setRecordingState("idle");
   }, [stopAllSources]);
 
+  // Uploads the in-review take to /api/takes and folds the resulting row
+  // back into dbLines, on top of the existing in-memory playback/re-record
+  // flow above.
+  const submitTake = useCallback(async () => {
+    const buffer = recordedBufferRef.current;
+    const lineIndex = recordedLineIndexRef.current;
+    if (!buffer || lineIndex == null || !renditionId) return;
+
+    const dbLine = dbLines.find((l) => l.idx === lineIndex);
+    if (!dbLine) {
+      setSubmitError("This line hasn't loaded from the database yet.");
+      return;
+    }
+
+    setIsSubmitting(true);
+    setSubmitError(null);
+    try {
+      const lineStartSec = lineTimes[lineIndex]?.start ?? dbLine.start_ms / 1000;
+      const offsetMs = Math.round(
+        (recordStartSecRef.current - lineStartSec) * 1000
+      );
+      const durationMs = Math.round(buffer.duration * 1000);
+      const wavBlob = audioBufferToWavBlob(buffer);
+
+      const formData = new FormData();
+      formData.append("audio", wavBlob, `${dbLine.id}-take.wav`);
+      formData.append("rendition_id", renditionId);
+      formData.append("line_id", dbLine.id);
+      formData.append("singer_name", singerName.trim() || "Anonymous");
+      formData.append("offset_ms", String(offsetMs));
+      formData.append("duration_ms", String(durationMs));
+
+      const res = await fetch("/api/takes", { method: "POST", body: formData });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error ?? `Upload failed (${res.status})`);
+      }
+      const { take } = (await res.json()) as { take: Take };
+
+      setDbLines((prev) =>
+        prev.map((l) => (l.id === dbLine.id ? { ...l, take } : l))
+      );
+      setJustSubmitted(true);
+    } catch (e) {
+      setSubmitError("Could not save your take: " + String(e));
+    } finally {
+      setIsSubmitting(false);
+    }
+  }, [renditionId, dbLines, lineTimes, singerName]);
+
   const selectedCount = selectedLines.size;
+
+  const recordedIndices = useMemo(
+    () => new Set(dbLines.filter((l) => l.take).map((l) => l.idx)),
+    [dbLines]
+  );
 
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-6 bg-zinc-50 px-6 py-16 font-sans dark:bg-black">
@@ -389,6 +495,7 @@ export default function SongPage() {
         currentIndex={currentIndex}
         selectedLines={selectedLines}
         onToggleLine={toggleLine}
+        recordedLines={recordedIndices}
       />
 
       <div className="w-full max-w-md space-y-2">
@@ -443,8 +550,20 @@ export default function SongPage() {
           )}
         </div>
 
+        <input
+          type="text"
+          value={singerName}
+          onChange={(e) => setSingerName(e.target.value)}
+          placeholder="Your name (optional)"
+          className="w-full rounded border border-zinc-300 px-3 py-1.5 text-sm text-black dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
+        />
+
         {micError && (
           <p className="text-xs text-red-600 dark:text-red-400">{micError}</p>
+        )}
+
+        {submitError && (
+          <p className="text-xs text-red-600 dark:text-red-400">{submitError}</p>
         )}
 
         {recordingState === "recording" && (
@@ -497,7 +616,22 @@ export default function SongPage() {
               Play back my take
             </button>
           )}
+          {recordingState === "hasRecording" && !justSubmitted && (
+            <button
+              disabled={isSubmitting || !renditionId}
+              className="rounded bg-emerald-600 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+              onClick={submitTake}
+            >
+              {isSubmitting ? "Submitting…" : "Submit"}
+            </button>
+          )}
         </div>
+
+        {justSubmitted && (
+          <p className="text-center text-xs font-medium text-emerald-600 dark:text-emerald-400">
+            Saved to the rendition.
+          </p>
+        )}
 
         {recordingState === "hasRecording" && (
           <div className="pt-1 text-center">

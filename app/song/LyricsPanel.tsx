@@ -7,11 +7,13 @@ export default function LyricsPanel({
   currentIndex,
   selectedLines,
   onToggleLine,
+  recordedLines,
 }: {
   lines: string[];
   currentIndex: number;
   selectedLines?: Set<number>;
   onToggleLine?: (index: number) => void;
+  recordedLines?: Set<number>;
 }) {
   const activeRef = useRef<HTMLDivElement>(null);
 
@@ -32,6 +34,7 @@ export default function LyricsPanel({
       <div className="space-y-1">
         {lines.map((line, i) => {
           const selected = selectedLines?.has(i) ?? false;
+          const recorded = recordedLines?.has(i) ?? false;
           return (
             <div
               key={i}
@@ -59,6 +62,14 @@ export default function LyricsPanel({
               >
                 {line}
               </p>
+              {recorded && (
+                <span
+                  className="ml-auto shrink-0 text-xs text-emerald-400"
+                  title="Already recorded"
+                >
+                  &#9679;
+                </span>
+              )}
             </div>
           );
         })}
