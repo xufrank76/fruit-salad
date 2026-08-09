@@ -14,7 +14,8 @@ import { TRACK } from "@/lib/track";
 import LyricsPanel from "./LyricsPanel";
 
 const RECORD_SONG_GAIN = 0.35; // duck the backing track while you sing over it
-const FALLBACK_LEAD_IN_SEC = 2; // pre-roll when the chosen line has no previous line
+const MIN_LEAD_IN_SEC = 2; // guaranteed minimum pre-roll, even if the previous line is very short
+const TAIL_PADDING_SEC = 0.6; // buffer past the next line's timestamp so trailing words aren't clipped
 
 type RecordingState = "idle" | "recording" | "hasRecording";
 type CueKind = "wait" | "countin" | "sing" | "done";
@@ -214,13 +215,18 @@ export default function SongPage() {
 
     // Pre-roll: start playback at the previous line so there's a natural
     // lead-in (you hear how the song flows into your line), then come in
-    // exactly where the chosen line starts.
+    // exactly where the chosen line starts. If that previous line is very
+    // short (or there isn't one), fall back further to guarantee at least
+    // MIN_LEAD_IN_SEC of prep time.
     const prevIdx = startIdx - 1;
+    const floorSec = Math.max(0, lineStartSec - MIN_LEAD_IN_SEC);
     const recordFromSec =
-      prevIdx >= 0
-        ? lineTimes[prevIdx].start
-        : Math.max(0, lineStartSec - FALLBACK_LEAD_IN_SEC);
+      prevIdx >= 0 ? Math.min(lineTimes[prevIdx].start, floorSec) : floorSec;
     const comeInSec = lineStartSec;
+    // Extend past the line's nominal end (the next line's LRC timestamp,
+    // which is only where the NEXT line starts, not where this one actually
+    // finishes) so a trailing word or breath doesn't get clipped.
+    const recordEndSec = endSec + TAIL_PADDING_SEC;
 
     const ctx = getAudioContext();
     if (!songBufferRef.current) {
@@ -248,7 +254,7 @@ export default function SongPage() {
     stopAllSources();
 
     const startAt = ctx.currentTime + 0.3; // small lead so scheduling lands cleanly
-    const endAt = startAt + (endSec - recordFromSec);
+    const endAt = startAt + (recordEndSec - recordFromSec);
 
     // Backing track, ducked, on the shared clock.
     const songSource = ctx.createBufferSource();
@@ -317,14 +323,17 @@ export default function SongPage() {
 
     audioRef.current?.pause();
     stopAllSources();
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
     const startAt = ctx.currentTime + 0.15;
+    const playFromSec = recordStartSecRef.current;
+    const endAt = startAt + voiceBuffer.duration;
 
     // Same trick as the sync-test prototype: song and voice share one
     // AudioContext clock, scheduled from the same startAt, so they can't drift.
     const songSource = ctx.createBufferSource();
     songSource.buffer = songBuffer;
     songSource.connect(ctx.destination);
-    songSource.start(startAt, recordStartSecRef.current);
+    songSource.start(startAt, playFromSec);
     activeSourcesRef.current.push(songSource);
 
     const voiceSource = ctx.createBufferSource();
@@ -334,10 +343,23 @@ export default function SongPage() {
     // recordFromSec, so the take lands exactly where it was sung.
     voiceSource.start(startAt);
     activeSourcesRef.current.push(voiceSource);
+
+    // Keep the lyric highlight following the actual playback position —
+    // without this it stays frozen wherever recording left it, which makes
+    // the panel look out of sync with what's audibly playing.
+    const tick = () => {
+      const pos = playFromSec + (ctx.currentTime - startAt);
+      setCurrentTime(Math.max(0, pos));
+      if (ctx.currentTime < endAt) {
+        rafRef.current = requestAnimationFrame(tick);
+      }
+    };
+    rafRef.current = requestAnimationFrame(tick);
   }, [stopAllSources]);
 
   const reRecord = useCallback(() => {
     stopAllSources();
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
     recordedBufferRef.current = null;
     setRecordingState("idle");
   }, [stopAllSources]);
