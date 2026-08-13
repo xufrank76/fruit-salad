@@ -1,5 +1,10 @@
 @import "tailwindcss";
 
+/* Force light everywhere: bind the `dark:` variant to a `.dark` class we never
+   add, so every existing `dark:*` utility stays inert regardless of the OS
+   color scheme (Tailwind v4 otherwise wires `dark:` to prefers-color-scheme). */
+@custom-variant dark (&:where(.dark, .dark *));
+
 :root {
   --background: #ffffff;
   --foreground: #171717;
@@ -11,13 +16,6 @@
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
   --font-display: var(--font-neue-montreal);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
 }
 
 body {

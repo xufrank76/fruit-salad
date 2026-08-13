@@ -942,7 +942,19 @@ export default function RecordPage() {
 
   if (isMobile) {
     return (
-      <div className="flex h-dvh w-full flex-col overflow-hidden bg-white dark:bg-black">
+      <div className="relative h-dvh w-full overflow-hidden bg-white">
+        {/* Same dimmed decorative fruit field as the desktop layout, sized to
+            the design canvas and centered so it fills the phone background. */}
+        <div className="pointer-events-none absolute inset-0 opacity-10">
+          <div
+            className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
+            style={{ width: CANVAS_WIDTH, height: CANVAS_HEIGHT }}
+          >
+            <FruitField />
+          </div>
+        </div>
+
+        <div className="relative z-10 flex h-full w-full flex-col">
         {/* Header: back, title/artist, mute */}
         <div className="flex items-center gap-3 px-4 pt-4">
           <Link href="/salad" className="shrink-0 text-black dark:text-zinc-100">
@@ -1017,8 +1029,9 @@ export default function RecordPage() {
         </div>
 
         {/* Record control panel — pinned at the bottom, scrolls if tall */}
-        <div className="flex max-h-[46vh] shrink-0 flex-col items-center justify-center overflow-y-auto border-t border-zinc-200 px-6 py-4 text-center dark:border-zinc-800">
+        <div className="flex max-h-[46vh] shrink-0 flex-col items-center justify-center overflow-y-auto border-t border-zinc-200 bg-white/70 px-6 py-4 text-center backdrop-blur-sm">
           <RecordControlPanel sz={(n) => `${n}px`} {...controlPanelProps} />
+        </div>
         </div>
       </div>
     );
