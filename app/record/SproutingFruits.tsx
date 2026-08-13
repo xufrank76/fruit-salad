@@ -3,13 +3,11 @@
 import { FRUIT_BOIL_CLASS, type FruitKind } from "../FruitField";
 import { cover } from "../coverUnit";
 
-// A single decorative fruit "sprouted" into the record-page background when a
-// line is contributed. x/y are the fruit's CENTER, raw design-canvas px
-// (1280x832), scaled by cover() at render — matching FruitField. Unlike
-// FruitField's ambient scatter, these are placed deliberately (one per line
-// slot) so they stay clear of the true canvas edges: the page's cover()
-// scaling crops the canvas top/bottom (or left/right) to fill wide/narrow
-// viewports, and anything placed near an edge can end up entirely off-screen.
+// A single decorative fruit for one filled line of the song. x/y are the
+// fruit's CENTER in raw design-canvas px (1280x832), scaled by cover() at
+// render — matching FruitField. There's exactly one per taken line (whoever
+// sang it), laid out on a grid sized to the song's total line count so the
+// field fills evenly and, when every line is sung, covers the whole canvas.
 export type SproutedFruit = {
   id: number;
   kind: FruitKind;
@@ -21,58 +19,69 @@ export type SproutedFruit = {
 };
 
 // Fixed cycling order (not Object.keys(FRUIT_BOIL_CLASS), which is alphabetical
-// and can land the same kind in adjacent slots) so consecutive fruits always
+// and can land the same kind in adjacent slots) so neighbouring fruits always
 // read as a varied sequence instead of clustering by chance.
 const KIND_ORDER: FruitKind[] = ["apple", "orange", "lemon", "pear", "blueberry"];
 
-// Predetermined placement area fruits fill through, bottom row to top row, as
-// lines of the song get filled. Kept well inside the 1280x832 design canvas
-// (not flush with the true edges) so slots stay visible even when cover()
-// scaling crops the canvas edges on wide/narrow viewports.
-const X_MARGIN = 80;
-const Y_BOTTOM = 652;
+// Placement area, kept inside the 1280x832 design canvas (not flush with the
+// true edges) so slots stay visible even when cover() scaling crops the canvas
+// edges on wide/narrow viewports.
+const X_MARGIN = 70;
+const Y_TOP = 110;
+const Y_BOTTOM = 720;
 const USABLE_W = 1280 - X_MARGIN * 2;
+const USABLE_H = Y_BOTTOM - Y_TOP;
 
-// Same size range and density as FruitField's own scattered fruit (see
-// ../FruitField.tsx's FRUITS list — sizes ~164-234px, packed loosely enough
-// to overlap). This field is meant to read as more of that same background,
-// not a separate tidy non-overlapping layout.
-const SIZE_MIN = 160;
-const SIZE_MAX = 235;
-const GRID_COLS = 5;
-const ROW_HEIGHT = 150;
+// Deterministic per-index pseudo-random (mulberry32). slotFruit runs during
+// render now (fruits are derived from the taken lines), so it must be pure —
+// Math.random() would reshuffle positions every poll and risk an SSR/client
+// hydration mismatch. Seeding by line index makes each line's fruit stable.
+function rngFor(seed: number): () => number {
+  let a = (seed + 1) * 0x6d2b79f5;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
 
-// Client-only (called from an event handler, never during render) so Math.random
-// here can't cause a server/client hydration mismatch.
-//
-// `index` places this fruit in a fixed bottom-to-top grid: slot 0 (the first
-// line filled) sits in the bottom-left cell, later slots snake left-to-right
-// then right-to-left up through the rows. Rows wrap back to the bottom once
-// the song has filled more lines than fit on screen at this size — like a
-// bowl piling fruit on top of itself once full, matching how densely
-// FruitField's own fruits already overlap.
-export function slotFruit(id: number, index: number): SproutedFruit {
-  const cellW = USABLE_W / GRID_COLS;
-  const rowIndex = Math.floor(index / GRID_COLS);
-  const row = rowIndex % Math.max(1, Math.floor((Y_BOTTOM - 60) / ROW_HEIGHT));
-  const rawCol = index % GRID_COLS;
-  const col = rowIndex % 2 === 0 ? rawCol : GRID_COLS - 1 - rawCol; // snake for a nicer fill order
+// A near-square grid sized to `total` lines, so the fruits spread across the
+// whole placement area and end up evenly covering it once every line is sung.
+function gridFor(total: number) {
+  const n = Math.max(1, total);
+  const cols = Math.max(1, Math.round(Math.sqrt((n * USABLE_W) / USABLE_H)));
+  const rows = Math.ceil(n / cols);
+  return { cols, rows, cellW: USABLE_W / cols, cellH: USABLE_H / rows };
+}
+
+// Places the fruit for line `index` (of `total` lines) in its own grid cell,
+// filling bottom row to top so the field grows upward as lines get sung.
+export function slotFruit(index: number, total: number): SproutedFruit {
+  const rand = rngFor(index);
+  const { cols, cellW, cellH } = gridFor(total);
+  const row = Math.floor(index / cols);
+  const col = index % cols;
 
   const cx = X_MARGIN + col * cellW + cellW / 2;
-  const cy = Y_BOTTOM - row * ROW_HEIGHT;
+  const cy = Y_BOTTOM - (row * cellH + cellH / 2); // row 0 = bottom
 
-  const size = SIZE_MIN + Math.random() * (SIZE_MAX - SIZE_MIN);
-  const jitterX = (cellW / 2) * 0.5 * (Math.random() * 2 - 1);
-  const jitterY = (ROW_HEIGHT / 2) * 0.5 * (Math.random() * 2 - 1);
+  // Slightly larger than a cell so neighbours overlap into a full, bowl-like
+  // field rather than a tidy checkerboard.
+  const base = Math.min(cellW, cellH);
+  const size = base * (1.2 + rand() * 0.5);
+  const jitterX = cellW * 0.16 * (rand() * 2 - 1);
+  const jitterY = cellH * 0.16 * (rand() * 2 - 1);
 
   return {
-    id,
+    id: index,
     kind: KIND_ORDER[index % KIND_ORDER.length],
     x: cx + jitterX,
     y: cy + jitterY,
     size,
-    rotateDeg: Math.random() * 30 - 15,
-    boilMs: 800 + Math.random() * 500,
+    rotateDeg: rand() * 30 - 15,
+    boilMs: 800 + rand() * 500,
   };
 }
 

@@ -139,14 +139,9 @@ export default function RecordPage() {
   const startReviewPlaybackRef = useRef<((fromPos: number) => void) | null>(null);
   const reviewBarRef = useRef<HTMLDivElement>(null);
 
-  // Decorative fruits that accumulate in the background — one sprouts per line
-  // contributed. nextFruitIdRef gives each a stable React key.
-  const [bgFruits, setBgFruits] = useState<SproutedFruit[]>([]);
-  const nextFruitIdRef = useRef(0);
-  // How many of the song's lines have a fruit slot filled so far — seeded
-  // from already-taken lines on load, then advanced by one per line recorded.
-  const filledSlotsRef = useRef(0);
-  const initialFruitsSeededRef = useRef(false);
+  // True while your own submit/delete is mid-request, so the live-update poll
+  // can skip a beat instead of overwriting your not-yet-committed change.
+  const writeInFlightRef = useRef(false);
 
   const songBufferRef = useRef<AudioBuffer | null>(null);
   const recordedBufferRef = useRef<AudioBuffer | null>(null);
@@ -220,6 +215,39 @@ export default function RecordPage() {
       });
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  // Live updates: poll the rendition so lines other people fill (or free up by
+  // deleting) light up here without a manual refresh. Paused while your own
+  // submit/delete is in flight so a stale response can't revert it, and a
+  // no-op when nothing changed so the lyrics list doesn't re-render every tick.
+  useEffect(() => {
+    let cancelled = false;
+    const interval = setInterval(() => {
+      if (writeInFlightRef.current) return;
+      fetch(`/api/renditions/${TRACK.id}`)
+        .then((res) => res.json())
+        .then((data: { renditionId: string; lines: DbLine[] }) => {
+          if (cancelled) return;
+          setRenditionId((r) => r ?? data.renditionId);
+          setDbLines((prev) => {
+            const changed =
+              prev.length !== data.lines.length ||
+              data.lines.some((l) => {
+                const p = prev.find((x) => x.id === l.id);
+                return !p || (p.take?.id ?? null) !== (l.take?.id ?? null);
+              });
+            return changed ? data.lines : prev;
+          });
+        })
+        .catch(() => {
+          /* transient network error — try again next tick */
+        });
+    }, 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
     };
   }, []);
 
@@ -424,22 +452,18 @@ export default function RecordPage() {
 
   const lines = useMemo(() => lyrics.map((l) => l.text), [lyrics]);
 
-  // Seed the background with fruits for lines that were already filled before
-  // this visit (by anyone), so the field reflects real progress instead of
-  // restarting from the bottom every time the page loads. Runs once, the
-  // first time dbLines actually has rows.
-  useEffect(() => {
-    if (initialFruitsSeededRef.current || dbLines.length === 0) return;
-    initialFruitsSeededRef.current = true;
-    const already = dbLines.filter((l) => l.take).length;
-    filledSlotsRef.current = already;
-    if (already > 0) {
-      const seeded = Array.from({ length: already }, (_, i) =>
-        slotFruit(nextFruitIdRef.current++, i)
-      );
-      setBgFruits((prev) => [...prev, ...seeded]);
-    }
-  }, [dbLines]);
+  // One background fruit per taken line — everyone's contributions, not just
+  // yours. Derived from dbLines (which the live poll keeps current), so a fruit
+  // appears the moment any line is filled and disappears when it's deleted;
+  // the grid is sized to the song's total lines, so the field fills evenly and
+  // covers the canvas once every line is sung. Deterministic per line index
+  // (see slotFruit), so positions stay put across polls and re-renders.
+  const bgFruits = useMemo<SproutedFruit[]>(() => {
+    const total = dbLines.length || lines.length;
+    return dbLines
+      .filter((l) => l.take)
+      .map((l) => slotFruit(l.idx, total));
+  }, [dbLines, lines.length]);
 
   const hasTimestamps =
     lyrics.length > 0 && lyrics.every((l) => l.timeMs != null);
@@ -817,23 +841,17 @@ export default function RecordPage() {
     setPanelState("idle");
   }, [stopAllSources]);
 
-  const sproutAndFinish = useCallback(
-    (count: number) => {
-      const startSlot = filledSlotsRef.current;
-      const sprouted = Array.from({ length: count }, (_, i) =>
-        slotFruit(nextFruitIdRef.current++, startSlot + i)
-      );
-      filledSlotsRef.current += count;
-      setBgFruits((prev) => [...prev, ...sprouted]);
-      recordedBufferRef.current = null;
-      setPanelState("success");
-      successTimeoutRef.current = setTimeout(() => {
-        setPanelState("idle");
-        setSelectedIndices(new Set());
-      }, 1400);
-    },
-    []
-  );
+  // Fruits are derived from the taken lines (see bgFruits), so submitting —
+  // which fills those lines in dbLines — makes the fruits appear on their own;
+  // this just shows the success beat and resets the selection.
+  const finishSubmit = useCallback(() => {
+    recordedBufferRef.current = null;
+    setPanelState("success");
+    successTimeoutRef.current = setTimeout(() => {
+      setPanelState("idle");
+      setSelectedIndices(new Set());
+    }, 1400);
+  }, []);
 
   const submit = useCallback(async () => {
     if (selectedIndices.size === 0) return;
@@ -850,11 +868,12 @@ export default function RecordPage() {
     // Persist to the backend when we can; otherwise fall back to a local-only
     // "success" so recording still works if the API is unreachable.
     if (!buffer || !renditionId || dbLines.length === 0) {
-      sproutAndFinish(indices.length);
+      finishSubmit();
       return;
     }
 
     setIsSubmitting(true);
+    writeInFlightRef.current = true;
     try {
       const name = singerName.trim() || "Anonymous";
       const wav = audioBufferToWavBlob(buffer);
@@ -897,11 +916,12 @@ export default function RecordPage() {
           return next;
         });
       }
-      sproutAndFinish(indices.length);
+      finishSubmit();
     } catch (e) {
       setSubmitError("Could not save your take: " + String(e));
     } finally {
       setIsSubmitting(false);
+      writeInFlightRef.current = false;
     }
   }, [
     selectedIndices,
@@ -910,7 +930,7 @@ export default function RecordPage() {
     dbLines,
     lineTimes,
     singerName,
-    sproutAndFinish,
+    finishSubmit,
   ]);
 
   const [deletingLine, setDeletingLine] = useState<number | null>(null);
@@ -924,6 +944,7 @@ export default function RecordPage() {
       const takeId = line?.take?.id;
       if (!line || !takeId || deletingLine !== null) return;
       setDeletingLine(idx);
+      writeInFlightRef.current = true;
       try {
         const res = await fetch("/api/takes", {
           method: "DELETE",
@@ -943,12 +964,13 @@ export default function RecordPage() {
           next.delete(takeId);
           return next;
         });
-        setBgFruits((prev) => prev.slice(0, -1));
-        filledSlotsRef.current = Math.max(0, filledSlotsRef.current - 1);
+        // The line's fruit disappears on its own — bgFruits is derived from
+        // the taken lines, and this line just became untaken.
       } catch (e) {
         setSubmitError("Could not delete your take: " + String(e));
       } finally {
         setDeletingLine(null);
+        writeInFlightRef.current = false;
       }
     },
     [dbLines, deletingLine]
@@ -1025,14 +1047,18 @@ export default function RecordPage() {
   if (isMobile) {
     return (
       <div className="relative h-dvh w-full overflow-hidden bg-white">
-        {/* Same dimmed decorative fruit field as the desktop layout, sized to
-            the design canvas and centered so it fills the phone background. */}
-        <div className="pointer-events-none absolute inset-0 opacity-10">
+        {/* Same background as the desktop layout, sized to the design canvas
+            and centered: the ambient field dimmed, plus one vivid fruit per
+            taken line growing in as the song fills. */}
+        <div className="pointer-events-none absolute inset-0">
           <div
             className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
             style={{ width: CANVAS_WIDTH, height: CANVAS_HEIGHT }}
           >
-            <FruitField />
+            <div className="opacity-10">
+              <FruitField />
+            </div>
+            <SproutingFruits fruits={bgFruits} />
           </div>
         </div>
 
