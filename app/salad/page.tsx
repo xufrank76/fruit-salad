@@ -2,11 +2,48 @@ import Image from "next/image";
 import Link from "next/link";
 import AlbumCarousel from "./AlbumCarousel";
 import { fetchAlbumArtwork } from "@/lib/itunes";
-import { mockCompletionFor, OTHER_TRACKS, TRACK } from "@/lib/track";
+import { OTHER_TRACKS, TRACK } from "@/lib/track";
+import { supabaseServer } from "@/lib/supabase-server";
 import { CANVAS_HEIGHT, CANVAS_WIDTH, cover } from "../coverUnit";
 import FruitField from "../FruitField";
 
+// Live completion, not a cached snapshot — recompute per request so the shelf
+// reflects real progress. (Album art fetches keep their own 1-day cache.)
+export const dynamic = "force-dynamic";
+
+// Real completion = distinct lines with a take / total lines, for the song's
+// public rendition. Read-only (never creates a rendition); 0 if none/error.
+async function getCompletion(songId: string): Promise<number> {
+  try {
+    const { data: lines } = await supabaseServer
+      .from("lines")
+      .select("id")
+      .eq("song_id", songId);
+    const total = lines?.length ?? 0;
+    if (total === 0) return 0;
+
+    const { data: rendition } = await supabaseServer
+      .from("renditions")
+      .select("id")
+      .eq("song_id", songId)
+      .eq("mode", "public")
+      .maybeSingle();
+    if (!rendition) return 0;
+
+    const { data: takes } = await supabaseServer
+      .from("takes")
+      .select("line_id")
+      .eq("rendition_id", rendition.id);
+    const takenLineIds = new Set((takes ?? []).map((t) => t.line_id));
+    return Math.round((takenLineIds.size / total) * 100);
+  } catch {
+    return 0;
+  }
+}
+
 export default async function SaladPage() {
+  const trackCompletion = await getCompletion(TRACK.id);
+
   // Licensed-for-display artwork via Apple's iTunes Search API (lib/itunes.ts)
   // — falls back to the generated halftone pattern below if the lookup fails.
   const coverUrl = await fetchAlbumArtwork(TRACK.artist, TRACK.title);
@@ -20,7 +57,7 @@ export default async function SaladPage() {
     title: t.title,
     artist: t.artist,
     coverUrl: otherCoverUrls[i],
-    completePercent: mockCompletionFor(t.title),
+    completePercent: 0, // no DB rows -> genuinely nothing recorded yet
     singable: false,
   }));
   const splitAt = Math.ceil(otherTracks.length / 2);
@@ -30,7 +67,7 @@ export default async function SaladPage() {
       title: TRACK.title,
       artist: TRACK.artist,
       coverUrl,
-      completePercent: mockCompletionFor(TRACK.title),
+      completePercent: trackCompletion, // real: recorded lines / total lines
       singable: true,
     },
     ...otherTracks.slice(splitAt),

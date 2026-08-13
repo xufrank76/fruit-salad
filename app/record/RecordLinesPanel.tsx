@@ -1,6 +1,6 @@
 "use client";
 
-import { X } from "lucide-react";
+import { CircleCheck, CirclePlus } from "lucide-react";
 import { useEffect, useRef } from "react";
 
 export default function RecordLinesPanel({
@@ -66,19 +66,21 @@ export default function RecordLinesPanel({
                 </span>
               ) : selected ? (
                 <button
+                  disabled={disabled}
                   onClick={() => onToggleLine(i)}
-                  className="font-display flex shrink-0 items-center gap-1 whitespace-nowrap rounded-[5px] bg-black px-2 py-1 text-xs text-white"
+                  aria-label="Remove this line from your selection"
+                  className="shrink-0 text-white disabled:cursor-not-allowed disabled:opacity-40"
                 >
-                  sing this!
-                  <X size={10} />
+                  <CircleCheck size={20} />
                 </button>
               ) : (
                 <button
                   disabled={disabled}
                   onClick={() => onToggleLine(i)}
-                  className="font-display shrink-0 whitespace-nowrap rounded-[5px] bg-zinc-300/80 px-2 py-1 text-xs text-black disabled:opacity-40"
+                  aria-label="Sing this line"
+                  className="shrink-0 text-red-200/50 hover:text-white disabled:opacity-40 disabled:hover:text-red-200/50"
                 >
-                  sing this!
+                  <CirclePlus size={20} />
                 </button>
               )}
             </div>

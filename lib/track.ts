@@ -10,24 +10,14 @@ export const TRACK = {
 };
 
 // The rest of the library — cover art only, no audio/lyrics wired up yet, so
-// these render on the salad page but aren't singable like TRACK is.
+// these render on the salad page but aren't singable like TRACK is. With no
+// DB rows they have no real completion (0%).
 export const OTHER_TRACKS: { title: string; artist: string }[] = [
   { title: "Risk It All", artist: "Bruno Mars" },
   { title: "thank u, next", artist: "Ariana Grande" },
   { title: "One Dance", artist: "Drake" },
   { title: "You Belong With Me", artist: "Taylor Swift" },
   { title: "Let It Go", artist: "Idina Menzel" },
-  { title: "I Want You Back", artist: "The Jackson 5" },
+  { title: "Clarity", artist: "Zedd" },
+  { title: "Birds of a Feather", artist: "Billie Eilish" },
 ];
-
-// Static for now — no read-path against the Supabase `takes`/`lines` tables
-// yet (see README schema). Once claims/takes are queryable, this should be
-// (claimed or recorded lines) / (total lines) per song. Deterministic (not
-// random) so it doesn't reshuffle on every render.
-export function mockCompletionFor(title: string): number {
-  let hash = 0;
-  for (let i = 0; i < title.length; i++) {
-    hash = (hash * 31 + title.charCodeAt(i)) >>> 0;
-  }
-  return 20 + (hash % 71); // 20-90
-}

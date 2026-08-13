@@ -20,7 +20,7 @@ const GAP = 16;
 // Narrower than the card itself so only a sliver of the immediate neighbors
 // peeks past the edges — the rest of the shelf is fully clipped until
 // scrolled into view.
-const VIEWPORT = 330;
+const VIEWPORT = 1120;
 
 // Coverflow falloff: each card's scale/opacity is a continuous function of
 // its distance from the centered slot (in units of one card-width + gap),
@@ -90,7 +90,13 @@ export default function AlbumCarousel({
     return () => el.removeEventListener("scroll", recompute);
   }, [recompute]);
 
-  const centeredTrack = tracks[centerIndex];
+  // Clamped, not just `centerIndex` directly: guards against `tracks`
+  // shrinking out from under a stale centerIndex (e.g. a Fast Refresh after
+  // the track list changes while scrolled deep into the shelf) — without
+  // this, tracks[centerIndex] below can go out of bounds and crash the page.
+  const safeCenterIndex = Math.min(centerIndex, tracks.length - 1);
+  const centeredTrack = tracks[safeCenterIndex];
+  if (!centeredTrack) return null;
 
   return (
     <div className="flex flex-col items-center" style={{ gap: cover(20) }}>
@@ -105,7 +111,7 @@ export default function AlbumCarousel({
         }}
       >
         {tracks.map((track, i) => {
-        const isCenter = i === centerIndex;
+        const isCenter = i === safeCenterIndex;
         const { scale, opacity } = metrics[i] ?? {
           scale: MIN_SCALE,
           opacity: MIN_OPACITY,

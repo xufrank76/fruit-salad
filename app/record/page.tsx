@@ -1,10 +1,11 @@
 "use client";
 
-import { ArrowLeft, Check, Mic, Play, SkipBack, SkipForward } from "lucide-react";
+import { ArrowLeft, Check, Mic, Pause, Play, Rewind, FastForward } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  audioBufferToWavBlob,
   getAudioContext,
   getOutputLatencySec,
   loadAudioBuffer,
@@ -17,13 +18,22 @@ import { TRACK } from "@/lib/track";
 import { CANVAS_HEIGHT, CANVAS_WIDTH, cover } from "../coverUnit";
 import FruitField from "../FruitField";
 import RecordLinesPanel from "./RecordLinesPanel";
-import SproutingFruits, { randomFruit, type SproutedFruit } from "./SproutingFruits";
+import SproutingFruits, { slotFruit, type SproutedFruit } from "./SproutingFruits";
 
 const RECORD_SONG_GAIN = 0.35; // duck the backing track while you sing over it
 const MIN_LEAD_IN_SEC = 2; // guaranteed minimum pre-roll
 const TAIL_PADDING_SEC = 1.5; // buffer past the next line's timestamp — singers lag the reference vocal
 const AUTO_STOP_SAFETY_MS = 400; // extra margin so the stop timer never fires before the window ends
 const WAVE_BARS = 14;
+// ctx.outputLatency only reports the *output* half of the record-to-playback
+// round trip; the mic's input latency plus the acoustic/singer lag aren't
+// exposed by the browser, so compensating for output alone leaves takes a bit
+// late. This amount is added on top of the measured output latency to pull the
+// vocal earlier onto the beat — 140ms is a good starting point, and the review
+// panel's slider lets the singer fine-tune it by ear (persisted per device).
+const DEFAULT_SYNC_NUDGE_MS = 140;
+const SYNC_NUDGE_MIN_MS = -50;
+const SYNC_NUDGE_MAX_MS = 400;
 
 // "idle" covers both the empty prompt and the pre-record "ready" view — which
 // one shows is just whether selectedIndices is empty, not a separate state.
@@ -32,17 +42,46 @@ const WAVE_BARS = 14;
 type PanelState = "idle" | "recording" | "review" | "success";
 type CueMode = "wait" | "countin" | "sing" | "wrap";
 
+// Rows returned by /api/renditions/[songId] — the persisted, cross-user
+// source of truth for which lines are already sung.
+type Take = {
+  id: string;
+  audio_url: string;
+  offset_ms: number | null;
+  duration_ms: number | null;
+  singer_name: string | null;
+};
+type DbLine = {
+  id: string;
+  idx: number;
+  text: string;
+  start_ms: number;
+  end_ms: number;
+  take: Take | null;
+};
+
 export default function RecordPage() {
-  const audioRef = useRef<HTMLAudioElement>(null);
   const [lyrics, setLyrics] = useState<LyricLine[]>([]);
   const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [muted, setMuted] = useState(false);
+  const [playbackLoading, setPlaybackLoading] = useState(false);
 
-  // Lines submitted this session — no backend to persist to yet, so this is
-  // the only source of "taken" lines (no mock/hardcoded claims).
-  const [submittedLines, setSubmittedLines] = useState<Set<number>>(new Set());
+  // Persisted, cross-user state loaded from the backend: the rendition id and
+  // every line with whatever take already fills it. This is what makes "taken"
+  // lines survive refresh and show up for everyone.
+  const [renditionId, setRenditionId] = useState<string | null>(null);
+  const [dbLines, setDbLines] = useState<DbLine[]>([]);
+  const [singerName, setSingerName] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  // Vocal-earlier compensation (ms) added on top of the measured output
+  // latency. Adjustable by ear via the review slider; read live from a ref
+  // inside the playback callbacks so each looped pass picks up the new value.
+  const [syncNudgeMs, setSyncNudgeMs] = useState(DEFAULT_SYNC_NUDGE_MS);
+  const syncNudgeRef = useRef(DEFAULT_SYNC_NUDGE_MS);
 
   const [panelState, setPanelState] = useState<PanelState>("idle");
   const [selectedIndices, setSelectedIndices] = useState<Set<number>>(new Set());
@@ -54,12 +93,24 @@ export default function RecordPage() {
     Array(WAVE_BARS).fill(0.05)
   );
   const [playbackPct, setPlaybackPct] = useState(0);
+  const [isReviewPlaying, setIsReviewPlaying] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
+  const reviewPlayAnchorRef = useRef<{ ctxStartTime: number; offsetSec: number } | null>(
+    null
+  );
+  // Holds the latest startReviewPlayback so the playback loop can restart
+  // itself without referencing the callback before it's declared.
+  const startReviewPlaybackRef = useRef<((fromPos: number) => void) | null>(null);
+  const reviewBarRef = useRef<HTMLDivElement>(null);
 
   // Decorative fruits that accumulate in the background — one sprouts per line
   // contributed. nextFruitIdRef gives each a stable React key.
   const [bgFruits, setBgFruits] = useState<SproutedFruit[]>([]);
   const nextFruitIdRef = useRef(0);
+  // How many of the song's lines have a fruit slot filled so far — seeded
+  // from already-taken lines on load, then advanced by one per line recorded.
+  const filledSlotsRef = useRef(0);
+  const initialFruitsSeededRef = useRef(false);
 
   const songBufferRef = useRef<AudioBuffer | null>(null);
   const recordedBufferRef = useRef<AudioBuffer | null>(null);
@@ -79,25 +130,83 @@ export default function RecordPage() {
     null
   );
 
+  // Web Audio graph for the "listen to the song" transport (separate from
+  // the record/review graphs above) — <audio> tags drift too much for
+  // sample-accurate multi-track sync once other people's takes get layered
+  // in (see lib/audio.ts).
+  const mainPlayAnchorRef = useRef<{ ctxStartTime: number; offsetSec: number } | null>(
+    null
+  );
+  const backingGainRef = useRef<GainNode | null>(null);
+  const takesGainRef = useRef<GainNode | null>(null);
+  const takeBufferCacheRef = useRef<Map<string, AudioBuffer>>(new Map());
+  const mutedRef = useRef(false);
+
+  useEffect(() => {
+    mutedRef.current = muted;
+  }, [muted]);
+
   useEffect(() => {
     loadLyrics(TRACK.lyricsUrl).then(setLyrics);
   }, []);
 
-  const takenLines = submittedLines;
+  // Restore any saved name so takes stay attributed across visits. Read in an
+  // effect (not useState's initializer) because localStorage doesn't exist
+  // during SSR — initializing from it there would cause a hydration mismatch.
+  useEffect(() => {
+    const saved = localStorage.getItem("fruitsalad:singerName");
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (saved) setSingerName(saved);
+    const savedNudge = localStorage.getItem("fruitsalad:syncNudgeMs");
+    if (savedNudge != null && savedNudge !== "" && !Number.isNaN(Number(savedNudge))) {
+      const clamped = Math.max(
+        SYNC_NUDGE_MIN_MS,
+        Math.min(SYNC_NUDGE_MAX_MS, Number(savedNudge))
+      );
+      syncNudgeRef.current = clamped;
+      setSyncNudgeMs(clamped);
+    }
+  }, []);
+
+  // Resume the one global public rendition for this song: which lines already
+  // have a take, so the page opens showing real cross-user progress.
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/renditions/${TRACK.id}`)
+      .then((res) => res.json())
+      .then((data: { renditionId: string; lines: DbLine[] }) => {
+        if (cancelled) return;
+        setRenditionId(data.renditionId);
+        setDbLines(data.lines);
+      })
+      .catch(() => {
+        /* best-effort: recording still works without persistence */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const takenLines = useMemo(
+    () => new Set(dbLines.filter((l) => l.take).map((l) => l.idx)),
+    [dbLines]
+  );
   const takenBy = useMemo(() => {
     const by: Record<number, string> = {};
-    submittedLines.forEach((i) => {
-      by[i] = "you";
-    });
+    for (const l of dbLines) {
+      if (l.take) by[l.idx] = l.take.singer_name || "someone";
+    }
     return by;
-  }, [submittedLines]);
+  }, [dbLines]);
 
   useEffect(() => {
     let cancelled = false;
     const ctx = getAudioContext();
     loadAudioBuffer(ctx, TRACK.audioUrl)
       .then((buf) => {
-        if (!cancelled) songBufferRef.current = buf;
+        if (cancelled) return;
+        songBufferRef.current = buf;
+        setDuration(buf.duration);
       })
       .catch(() => {
         /* loaded lazily on first record instead */
@@ -129,7 +238,154 @@ export default function RecordPage() {
     };
   }, [stopAllSources]);
 
+  // Every taken line's committed recording, deduped and placed on the song's
+  // timeline. A multi-line take uploads the same recording once per line it
+  // covers, but offset_ms is computed per-line relative to one shared
+  // recordFromSec (see submit() below), so every row from the same take
+  // resolves to the identical startSec — grouping on (startSec, duration)
+  // collapses those duplicate rows back into a single scheduled source.
+  const takeWindows = useMemo(() => {
+    const byKey = new Map<string, { take: Take; startSec: number; endSec: number }>();
+    for (const line of dbLines) {
+      if (!line.take) continue;
+      const startSec = line.start_ms / 1000 + (line.take.offset_ms ?? 0) / 1000;
+      const durSec = (line.take.duration_ms ?? line.end_ms - line.start_ms) / 1000;
+      const key = `${Math.round(startSec * 1000)}:${line.take.duration_ms ?? "x"}`;
+      if (!byKey.has(key)) {
+        byKey.set(key, { take: line.take, startSec, endSec: startSec + durSec });
+      }
+    }
+    return [...byKey.values()];
+  }, [dbLines]);
+
+  const pauseMainPlayback = useCallback(() => {
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    stopAllSources();
+    mainPlayAnchorRef.current = null;
+    backingGainRef.current = null;
+    takesGainRef.current = null;
+    setIsPlaying(false);
+  }, [stopAllSources]);
+
+  // Plays the backing track plus everyone's committed takes layered on top,
+  // each scheduled at its own point on the song's timeline. The backing
+  // track ducks (same gain as while recording) under whichever take is
+  // currently sounding, so contributed vocals are actually audible instead
+  // of fighting the original mix. "mute others" is just this take bus's
+  // gain switched to 0.
+  const startMainPlayback = useCallback(
+    async (fromSec: number) => {
+      const ctx = getAudioContext();
+      const songBuffer = songBufferRef.current;
+      if (!songBuffer) return;
+
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      stopAllSources();
+
+      setPlaybackLoading(true);
+      try {
+        await Promise.all(
+          takeWindows.map(async ({ take }) => {
+            if (takeBufferCacheRef.current.has(take.id)) return;
+            const buf = await loadAudioBuffer(ctx, take.audio_url);
+            takeBufferCacheRef.current.set(take.id, buf);
+          })
+        );
+      } catch {
+        /* best-effort: the song still plays even if a take fails to load */
+      }
+      setPlaybackLoading(false);
+
+      // Takes were captured while the singer sang along to audio they heard a
+      // full record-to-playback round trip late, so their voice sits that much
+      // late in the buffer. Shift every take earlier by the same total here
+      // (matching reviewGeometry's voiceOffset correction) or the layered vocals
+      // lag the backing track on playback.
+      const vocalLatency =
+        getOutputLatencySec(ctx) + syncNudgeRef.current / 1000;
+      const windows = takeWindows.map((w) => ({
+        ...w,
+        startSec: w.startSec - vocalLatency,
+        endSec: w.endSec - vocalLatency,
+      }));
+
+      const clampedFrom = Math.max(0, Math.min(songBuffer.duration, fromSec));
+      const startAt = ctx.currentTime + 0.1;
+
+      const backingGain = ctx.createGain();
+      backingGain.gain.value = 1;
+      backingGain.connect(ctx.destination);
+      const songSource = ctx.createBufferSource();
+      songSource.buffer = songBuffer;
+      songSource.connect(backingGain);
+      songSource.start(startAt, clampedFrom);
+      activeSourcesRef.current.push(songSource);
+
+      const takesGain = ctx.createGain();
+      takesGain.gain.value = mutedRef.current ? 0 : 1;
+      takesGain.connect(ctx.destination);
+
+      for (const { take, startSec, endSec } of windows) {
+        if (endSec <= clampedFrom) continue;
+        const buf = takeBufferCacheRef.current.get(take.id);
+        if (!buf) continue;
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(takesGain);
+        const offsetIntoTake = Math.max(0, clampedFrom - startSec);
+        const when = startAt + Math.max(0, startSec - clampedFrom);
+        src.start(when, offsetIntoTake);
+        activeSourcesRef.current.push(src);
+      }
+
+      backingGainRef.current = backingGain;
+      takesGainRef.current = takesGain;
+      mainPlayAnchorRef.current = { ctxStartTime: startAt, offsetSec: clampedFrom };
+      setIsPlaying(true);
+
+      const tick = () => {
+        const anchor = mainPlayAnchorRef.current;
+        if (!anchor) return;
+        const pos = anchor.offsetSec + (ctx.currentTime - anchor.ctxStartTime);
+        if (pos >= songBuffer.duration) {
+          setCurrentTime(songBuffer.duration);
+          pauseMainPlayback();
+          return;
+        }
+        setCurrentTime(pos);
+        const ducked =
+          !mutedRef.current &&
+          windows.some((w) => pos >= w.startSec && pos < w.endSec);
+        backingGain.gain.setTargetAtTime(
+          ducked ? RECORD_SONG_GAIN : 1,
+          ctx.currentTime,
+          0.08
+        );
+        rafRef.current = requestAnimationFrame(tick);
+      };
+      rafRef.current = requestAnimationFrame(tick);
+    },
+    [takeWindows, stopAllSources, pauseMainPlayback]
+  );
+
   const lines = useMemo(() => lyrics.map((l) => l.text), [lyrics]);
+
+  // Seed the background with fruits for lines that were already filled before
+  // this visit (by anyone), so the field reflects real progress instead of
+  // restarting from the bottom every time the page loads. Runs once, the
+  // first time dbLines actually has rows.
+  useEffect(() => {
+    if (initialFruitsSeededRef.current || dbLines.length === 0) return;
+    initialFruitsSeededRef.current = true;
+    const already = dbLines.filter((l) => l.take).length;
+    filledSlotsRef.current = already;
+    if (already > 0) {
+      const seeded = Array.from({ length: already }, (_, i) =>
+        slotFruit(nextFruitIdRef.current++, i)
+      );
+      setBgFruits((prev) => [...prev, ...seeded]);
+    }
+  }, [dbLines]);
 
   const hasTimestamps =
     lyrics.length > 0 && lyrics.every((l) => l.timeMs != null);
@@ -164,12 +420,15 @@ export default function RecordPage() {
 
   const seekToLine = useCallback(
     (index: number) => {
-      const audio = audioRef.current;
       const time = lineTimes[index];
-      if (!audio || !time) return;
-      audio.currentTime = time.start;
+      if (!time) return;
+      if (isPlaying) {
+        void startMainPlayback(time.start);
+      } else {
+        setCurrentTime(time.start);
+      }
     },
-    [lineTimes]
+    [lineTimes, isPlaying, startMainPlayback]
   );
 
   const selectedList = useMemo(
@@ -209,6 +468,9 @@ export default function RecordPage() {
         window.startAt,
         window.endAt
       );
+      setPlaybackPct(0);
+      setIsReviewPlaying(false);
+      reviewPlayAnchorRef.current = null;
       setPanelState("review");
     } catch (e) {
       setMicError("Could not process recording: " + String(e));
@@ -254,14 +516,19 @@ export default function RecordPage() {
       return;
     }
 
-    audioRef.current?.pause();
+    pauseMainPlayback();
     recordFromSecRef.current = recordFromSec;
     lineStartSecRef.current = lineStartSec;
     stopAllSources();
 
     // Bigger lead so the "get ready" beat is visible before the pre-roll plays.
     const startAt = ctx.currentTime + 0.4;
-    const endAt = startAt + (recordEndSec - recordFromSec);
+    // The singer hears the backing track `outputLatency` after it's scheduled,
+    // so their singing of the final line trails the nominal window end by that
+    // much. Extend the capture tail by it, or TAIL_PADDING_SEC effectively
+    // shrinks to (tail - latency) and the end of the last line gets clipped.
+    const captureTailLatency = getOutputLatencySec(ctx);
+    const endAt = startAt + (recordEndSec - recordFromSec) + captureTailLatency;
 
     const songSource = ctx.createBufferSource();
     songSource.buffer = songBuffer;
@@ -310,7 +577,7 @@ export default function RecordPage() {
       }
     };
     rafRef.current = requestAnimationFrame(tick);
-  }, [selectedIndices, lineTimes, stopAllSources, finishRecording]);
+  }, [selectedIndices, lineTimes, stopAllSources, finishRecording, pauseMainPlayback]);
 
   const toggleLine = useCallback((idx: number) => {
     setSelectedIndices((prev) => {
@@ -344,105 +611,270 @@ export default function RecordPage() {
     setPanelState("idle");
   }, [stopAllSources]);
 
-  const playBackTake = useCallback(() => {
-    const ctx = getAudioContext();
-    const songBuffer = songBufferRef.current;
+  // Skip the pickup pre-roll on playback: start the song at the line, and
+  // offset into the voice buffer by the same amount (the buffer starts at
+  // recordFromSec). The take then plays only from where you actually sang.
+  // The voice buffer was captured on the raw AudioContext clock, but the
+  // singer sang along to what they *heard* — which lagged that clock by the
+  // full record-to-playback round trip (output latency + the input/acoustic
+  // lag the browser can't report, i.e. the sync nudge) — so their singing
+  // lands this much later in the capture than a naive offset assumes.
+  const reviewGeometry = useCallback(() => {
     const voiceBuffer = recordedBufferRef.current;
-    if (!songBuffer || !voiceBuffer) return;
-    stopAllSources();
-    if (rafRef.current) cancelAnimationFrame(rafRef.current);
-
-    const startAt = ctx.currentTime + 0.15;
-    // Skip the pickup pre-roll on playback: start the song at the line, and
-    // offset into the voice buffer by the same amount (the buffer starts at
-    // recordFromSec). The take then plays only from where you actually sang.
-    // The voice buffer was captured on the raw AudioContext clock, but the
-    // singer reacted to what they *heard* — which lagged that clock by the
-    // device's output latency — so their singing actually lands this much
-    // later in the capture than a naive offset assumes.
+    if (!voiceBuffer) return null;
+    const ctx = getAudioContext();
     const lineStartSec = lineStartSecRef.current;
-    const outputLatency = getOutputLatencySec(ctx);
+    const vocalLatency = getOutputLatencySec(ctx) + syncNudgeRef.current / 1000;
     const voiceOffset = Math.max(
       0,
-      lineStartSec - recordFromSecRef.current + outputLatency
+      lineStartSec - recordFromSecRef.current + vocalLatency
     );
     const playDur = Math.max(0.1, voiceBuffer.duration - voiceOffset);
-    const endAt = startAt + playDur;
+    return { lineStartSec, voiceOffset, playDur, voiceBuffer };
+  }, []);
 
-    const songSource = ctx.createBufferSource();
-    songSource.buffer = songBuffer;
-    songSource.connect(ctx.destination);
-    songSource.start(startAt, lineStartSec);
-    songSource.stop(endAt); // fix: previously ran to the end of the whole track
-    activeSourcesRef.current.push(songSource);
-
-    const voiceSource = ctx.createBufferSource();
-    voiceSource.buffer = voiceBuffer;
-    voiceSource.connect(ctx.destination);
-    voiceSource.start(startAt, voiceOffset);
-    activeSourcesRef.current.push(voiceSource);
-
-    // Visual response: drive a progress fill off the audio clock, reset at end.
-    setPlaybackPct(0);
-    const tick = () => {
-      const p = (ctx.currentTime - startAt) / playDur;
-      setPlaybackPct(Math.min(1, Math.max(0, p)));
-      if (ctx.currentTime < endAt) {
-        rafRef.current = requestAnimationFrame(tick);
-      } else {
-        setPlaybackPct(0);
-      }
-    };
-    rafRef.current = requestAnimationFrame(tick);
+  const pauseReviewPlayback = useCallback(() => {
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    stopAllSources();
+    reviewPlayAnchorRef.current = null;
+    setIsReviewPlaying(false);
   }, [stopAllSources]);
+
+  // Starts (or resumes) review playback at `fromPos` seconds into the take
+  // (0..playDur) — used for play, resume-after-pause, and scrubbing alike.
+  const startReviewPlayback = useCallback(
+    (fromPos: number) => {
+      const songBuffer = songBufferRef.current;
+      const geom = reviewGeometry();
+      if (!songBuffer || !geom) return;
+      const { lineStartSec, voiceOffset, playDur, voiceBuffer } = geom;
+
+      const ctx = getAudioContext();
+      stopAllSources();
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+
+      const clampedFrom = Math.max(0, Math.min(playDur, fromPos));
+      const startAt = ctx.currentTime + 0.1;
+      const endAt = startAt + (playDur - clampedFrom);
+
+      const songSource = ctx.createBufferSource();
+      songSource.buffer = songBuffer;
+      songSource.connect(ctx.destination);
+      songSource.start(startAt, lineStartSec + clampedFrom);
+      songSource.stop(endAt);
+      activeSourcesRef.current.push(songSource);
+
+      const voiceSource = ctx.createBufferSource();
+      voiceSource.buffer = voiceBuffer;
+      voiceSource.connect(ctx.destination);
+      voiceSource.start(startAt, voiceOffset + clampedFrom);
+      activeSourcesRef.current.push(voiceSource);
+
+      reviewPlayAnchorRef.current = { ctxStartTime: startAt, offsetSec: clampedFrom };
+      setPlaybackPct(clampedFrom / playDur);
+      setIsReviewPlaying(true);
+
+      const tick = () => {
+        const anchor = reviewPlayAnchorRef.current;
+        if (!anchor) return;
+        const pos = anchor.offsetSec + (ctx.currentTime - anchor.ctxStartTime);
+        if (pos >= playDur) {
+          // Loop back to the top so the singer can keep dragging the sync
+          // slider and hear each change on the next pass without re-pressing
+          // play — the restart re-reads syncNudgeRef via reviewGeometry().
+          startReviewPlaybackRef.current?.(0);
+          return;
+        }
+        setPlaybackPct(pos / playDur);
+        rafRef.current = requestAnimationFrame(tick);
+      };
+      rafRef.current = requestAnimationFrame(tick);
+    },
+    [reviewGeometry, stopAllSources]
+  );
+
+  useEffect(() => {
+    startReviewPlaybackRef.current = startReviewPlayback;
+  }, [startReviewPlayback]);
+
+  const toggleReviewPlayback = useCallback(() => {
+    if (isReviewPlaying) {
+      pauseReviewPlayback();
+      return;
+    }
+    // Restart from the top if playback already ran to the end; otherwise
+    // resume from wherever it was paused/scrubbed to.
+    startReviewPlayback(playbackPct >= 0.999 ? 0 : playbackPct * (reviewGeometry()?.playDur ?? 0));
+  }, [isReviewPlaying, playbackPct, pauseReviewPlayback, startReviewPlayback, reviewGeometry]);
+
+  // Scrubs to the position under `clientX` on the review progress bar. While
+  // paused this just moves the displayed position; while playing it
+  // reschedules playback to start from there.
+  const seekReview = useCallback(
+    (clientX: number) => {
+      const el = reviewBarRef.current;
+      const geom = reviewGeometry();
+      if (!el || !geom) return;
+      const rect = el.getBoundingClientRect();
+      const frac = rect.width > 0 ? (clientX - rect.left) / rect.width : 0;
+      const clampedFrac = Math.max(0, Math.min(1, frac));
+      if (isReviewPlaying) {
+        startReviewPlayback(clampedFrac * geom.playDur);
+      } else {
+        setPlaybackPct(clampedFrac);
+      }
+    },
+    [reviewGeometry, isReviewPlaying, startReviewPlayback]
+  );
+
+  // Live slider value change: update the compensation immediately (the looping
+  // review take will pick it up on its next pass). Kept cheap so dragging stays
+  // smooth — the actual reschedule happens on release via commitSync.
+  const applySync = useCallback((valueMs: number) => {
+    const clamped = Math.max(
+      SYNC_NUDGE_MIN_MS,
+      Math.min(SYNC_NUDGE_MAX_MS, Math.round(valueMs))
+    );
+    syncNudgeRef.current = clamped;
+    setSyncNudgeMs(clamped);
+    localStorage.setItem("fruitsalad:syncNudgeMs", String(clamped));
+  }, []);
+
+  // On release, if a take is playing, restart it from the current spot so the
+  // new offset is heard right away instead of only on the next loop.
+  const commitSync = useCallback(() => {
+    if (!isReviewPlaying) return;
+    const geom = reviewGeometry();
+    if (geom) startReviewPlayback(Math.min(playbackPct, 0.999) * geom.playDur);
+  }, [isReviewPlaying, reviewGeometry, startReviewPlayback, playbackPct]);
+
+  const resetSync = useCallback(() => {
+    applySync(DEFAULT_SYNC_NUDGE_MS);
+    commitSync();
+  }, [applySync, commitSync]);
 
   const retake = useCallback(() => {
     stopAllSources();
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     setPlaybackPct(0);
+    setIsReviewPlaying(false);
+    reviewPlayAnchorRef.current = null;
     recordedBufferRef.current = null;
     setPanelState("idle");
   }, [stopAllSources]);
 
-  const submit = useCallback(() => {
+  const sproutAndFinish = useCallback(
+    (count: number) => {
+      const startSlot = filledSlotsRef.current;
+      const sprouted = Array.from({ length: count }, (_, i) =>
+        slotFruit(nextFruitIdRef.current++, startSlot + i)
+      );
+      filledSlotsRef.current += count;
+      setBgFruits((prev) => [...prev, ...sprouted]);
+      recordedBufferRef.current = null;
+      setPanelState("success");
+      successTimeoutRef.current = setTimeout(() => {
+        setPanelState("idle");
+        setSelectedIndices(new Set());
+      }, 1400);
+    },
+    []
+  );
+
+  const submit = useCallback(async () => {
     if (selectedIndices.size === 0) return;
     stopAllSources();
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     setPlaybackPct(0);
-    setSubmittedLines((prev) => {
-      const next = new Set(prev);
-      selectedIndices.forEach((i) => next.add(i));
-      return next;
-    });
-    // Sprout one background fruit per contributed line.
-    const sprouted = [...selectedIndices].map(() =>
-      randomFruit(nextFruitIdRef.current++)
-    );
-    setBgFruits((prev) => [...prev, ...sprouted]);
-    recordedBufferRef.current = null;
-    setPanelState("success");
-    successTimeoutRef.current = setTimeout(() => {
-      setPanelState("idle");
-      setSelectedIndices(new Set());
-    }, 1400);
-  }, [selectedIndices, stopAllSources]);
+    setIsReviewPlaying(false);
+    reviewPlayAnchorRef.current = null;
+    setSubmitError(null);
+
+    const buffer = recordedBufferRef.current;
+    const indices = [...selectedIndices].sort((a, b) => a - b);
+
+    // Persist to the backend when we can; otherwise fall back to a local-only
+    // "success" so recording still works if the API is unreachable.
+    if (!buffer || !renditionId || dbLines.length === 0) {
+      sproutAndFinish(indices.length);
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const name = singerName.trim() || "Anonymous";
+      const wav = audioBufferToWavBlob(buffer);
+      const durationMs = Math.round(buffer.duration * 1000);
+
+      // One take row per selected line. All lines in a multi-line take share
+      // the same audio file; each row's offset_ms locates the file's start
+      // (recordFromSec) relative to that line — the same geometry the review
+      // playback uses — so "hear the salad" can place each line correctly.
+      for (const i of indices) {
+        const dbLine = dbLines.find((l) => l.idx === i);
+        if (!dbLine) continue;
+        const offsetMs = Math.round(
+          (recordFromSecRef.current - lineTimes[i].start) * 1000
+        );
+        const formData = new FormData();
+        formData.append("audio", wav, `${dbLine.id}-take.wav`);
+        formData.append("rendition_id", renditionId);
+        formData.append("line_id", dbLine.id);
+        formData.append("singer_name", name);
+        formData.append("offset_ms", String(offsetMs));
+        formData.append("duration_ms", String(durationMs));
+
+        const res = await fetch("/api/takes", {
+          method: "POST",
+          body: formData,
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => null);
+          throw new Error(body?.error ?? `Upload failed (${res.status})`);
+        }
+        const { take } = (await res.json()) as { take: Take };
+        setDbLines((prev) =>
+          prev.map((l) => (l.id === dbLine.id ? { ...l, take } : l))
+        );
+      }
+      sproutAndFinish(indices.length);
+    } catch (e) {
+      setSubmitError("Could not save your take: " + String(e));
+    } finally {
+      setIsSubmitting(false);
+    }
+  }, [
+    selectedIndices,
+    stopAllSources,
+    renditionId,
+    dbLines,
+    lineTimes,
+    singerName,
+    sproutAndFinish,
+  ]);
 
   const togglePlay = () => {
-    const audio = audioRef.current;
-    if (!audio) return;
-    if (audio.paused) void audio.play();
-    else audio.pause();
+    if (panelState !== "idle") return;
+    if (isPlaying) pauseMainPlayback();
+    else void startMainPlayback(currentTime);
   };
   const skip = (deltaSec: number) => {
-    const audio = audioRef.current;
-    if (!audio) return;
-    audio.currentTime = Math.max(0, Math.min(duration, audio.currentTime + deltaSec));
+    const songBuffer = songBufferRef.current;
+    if (!songBuffer) return;
+    const target = Math.max(0, Math.min(songBuffer.duration, currentTime + deltaSec));
+    if (isPlaying) void startMainPlayback(target);
+    else setCurrentTime(target);
   };
   const toggleMute = () => {
-    const audio = audioRef.current;
-    if (!audio) return;
-    audio.muted = !audio.muted;
-    setMuted(audio.muted);
+    setMuted((prev) => {
+      const next = !prev;
+      takesGainRef.current?.gain.setTargetAtTime(
+        next ? 0 : 1,
+        getAudioContext().currentTime,
+        0.08
+      );
+      return next;
+    });
   };
 
   return (
@@ -484,7 +916,8 @@ export default function RecordPage() {
 
         <button
           onClick={toggleMute}
-          className="font-display absolute flex items-center justify-center rounded-[20px] border border-zinc-300 bg-white text-black dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
+          disabled={takeWindows.length === 0}
+          className="font-display absolute flex items-center justify-center rounded-[20px] border border-zinc-300 bg-white text-black disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
           style={{
             left: cover(445),
             top: cover(124),
@@ -521,12 +954,17 @@ export default function RecordPage() {
           className="absolute flex items-center justify-center"
           style={{ left: cover(147), top: cover(578), width: cover(423), gap: cover(60) }}
         >
-          <button onClick={() => skip(-10)} className="text-black dark:text-zinc-100">
-            <SkipBack style={{ width: cover(24), height: cover(24) }} fill="currentColor" />
+          <button
+            onClick={() => skip(-10)}
+            disabled={panelState !== "idle" || playbackLoading}
+            className="text-black disabled:opacity-40 dark:text-zinc-100"
+          >
+            <Rewind style={{ width: cover(24), height: cover(24) }} />
           </button>
           <button
             onClick={togglePlay}
-            className="relative shrink-0"
+            disabled={panelState !== "idle" || playbackLoading}
+            className="relative shrink-0 disabled:opacity-40"
             style={{ width: cover(60), height: cover(60) }}
           >
             <Image
@@ -537,8 +975,12 @@ export default function RecordPage() {
               draggable={false}
             />
           </button>
-          <button onClick={() => skip(10)} className="text-black dark:text-zinc-100">
-            <SkipForward style={{ width: cover(24), height: cover(24) }} fill="currentColor" />
+          <button
+            onClick={() => skip(10)}
+            disabled={panelState !== "idle" || playbackLoading}
+            className="text-black disabled:opacity-40 dark:text-zinc-100"
+          >
+            <FastForward style={{ width: cover(24), height: cover(24) }} />
           </button>
         </div>
 
@@ -579,7 +1021,7 @@ export default function RecordPage() {
                 className="font-display mt-3 text-zinc-500 dark:text-zinc-400"
                 style={{ fontSize: cover(16) }}
               >
-                tap open lines on the left to contribute
+                add open lines on the left to contribute
               </p>
             </>
           )}
@@ -666,6 +1108,19 @@ export default function RecordPage() {
                     ))}
                   </div>
                 </>
+              ) : cue.mode === "wrap" ? (
+                <>
+                  <Check
+                    className="mb-2 text-green-600 dark:text-green-400"
+                    style={{ width: cover(32), height: cover(32) }}
+                  />
+                  <p
+                    className="font-display font-medium text-black dark:text-zinc-50"
+                    style={{ fontSize: cover(16) }}
+                  >
+                    nice take!
+                  </p>
+                </>
               ) : (
                 <>
                   <p
@@ -682,23 +1137,25 @@ export default function RecordPage() {
                   </p>
                 </>
               )}
-              <button
-                onClick={cancelFlow}
-                className="font-display mt-3 text-zinc-400 underline dark:text-zinc-600"
-                style={{ fontSize: cover(12) }}
-              >
-                cancel
-              </button>
+              {cue.mode !== "wrap" && (
+                <button
+                  onClick={cancelFlow}
+                  className="font-display mt-3 text-zinc-400 underline dark:text-zinc-600"
+                  style={{ fontSize: cover(12) }}
+                >
+                  cancel
+                </button>
+              )}
             </>
           )}
 
           {panelState === "review" && (
             <div className="w-full max-w-[280px]">
               <p
-                className="font-display text-zinc-500 dark:text-zinc-400"
-                style={{ fontSize: cover(12) }}
+                className="font-display font-medium text-black dark:text-zinc-50"
+                style={{ fontSize: cover(16) }}
               >
-                nice take
+                nice take!
               </p>
               <div
                 className="mb-4 mt-1 overflow-y-auto"
@@ -714,35 +1171,114 @@ export default function RecordPage() {
                   </p>
                 ))}
               </div>
-              <button
-                onClick={playBackTake}
-                className="font-display relative mb-4 flex w-full items-center justify-center gap-2 overflow-hidden rounded-[20px] border border-zinc-300 py-2 text-black dark:border-zinc-700 dark:text-zinc-50"
+              <div
+                className="font-display mb-4 flex w-full items-center gap-2 rounded-[20px] border border-zinc-300 py-2 pl-3 pr-4 text-black dark:border-zinc-700 dark:text-zinc-50"
                 style={{ fontSize: cover(14) }}
               >
-                {/* Visual response: fill sweeps across the button as the take plays. */}
-                <span
-                  className="absolute inset-y-0 left-0 bg-zinc-200 dark:bg-zinc-800"
-                  style={{ width: `${playbackPct * 100}%` }}
-                />
-                <span className="relative flex items-center gap-2">
-                  <Play size={14} fill="currentColor" />
-                  {playbackPct > 0 ? "playing…" : "play it back"}
+                <button
+                  onClick={toggleReviewPlayback}
+                  aria-label={isReviewPlaying ? "Pause" : "Play"}
+                  className="flex shrink-0 items-center justify-center"
+                >
+                  {isReviewPlaying ? (
+                    <Pause size={14} fill="currentColor" />
+                  ) : (
+                    <Play size={14} fill="currentColor" />
+                  )}
+                </button>
+                {/* Scrubbable: click or drag to seek, whether paused or playing. */}
+                <div
+                  ref={reviewBarRef}
+                  onPointerDown={(e) => {
+                    e.currentTarget.setPointerCapture(e.pointerId);
+                    seekReview(e.clientX);
+                  }}
+                  onPointerMove={(e) => {
+                    if (e.buttons !== 1) return;
+                    seekReview(e.clientX);
+                  }}
+                  className="relative h-2 flex-1 cursor-pointer touch-none overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800"
+                >
+                  <span
+                    className="absolute inset-y-0 left-0 bg-black dark:bg-white"
+                    style={{ width: `${playbackPct * 100}%` }}
+                  />
+                </div>
+                <span className="shrink-0 text-zinc-500 dark:text-zinc-400">
+                  {isReviewPlaying ? "looping…" : playbackPct > 0 ? "paused" : "play it back"}
                 </span>
-              </button>
+              </div>
+              {/* Sync calibration: play the take (it loops) and drag until your
+                  voice lands on the beat. The end labels tell you which way to
+                  drag based on what you hear, so no mental math. */}
+              <div className="font-display mb-3 w-full">
+                <div
+                  className="mb-1 flex items-center justify-between text-zinc-500 dark:text-zinc-400"
+                  style={{ fontSize: cover(12) }}
+                >
+                  <span>voice off the beat?</span>
+                  <button
+                    onClick={resetSync}
+                    className="underline hover:text-black dark:hover:text-zinc-50"
+                  >
+                    reset
+                  </button>
+                </div>
+                <input
+                  type="range"
+                  min={SYNC_NUDGE_MIN_MS}
+                  max={SYNC_NUDGE_MAX_MS}
+                  step={5}
+                  value={syncNudgeMs}
+                  onChange={(e) => applySync(Number(e.target.value))}
+                  onPointerUp={commitSync}
+                  onKeyUp={commitSync}
+                  aria-label="voice timing"
+                  className="w-full cursor-pointer accent-black dark:accent-white"
+                />
+                <div
+                  className="flex items-center justify-between text-zinc-400 dark:text-zinc-600"
+                  style={{ fontSize: cover(11) }}
+                >
+                  <span>← drag if voice is early</span>
+                  <span>drag if voice is late →</span>
+                </div>
+              </div>
+              <input
+                value={singerName}
+                onChange={(e) => {
+                  setSingerName(e.target.value);
+                  localStorage.setItem("fruitsalad:singerName", e.target.value);
+                }}
+                placeholder="your name (optional)"
+                maxLength={30}
+                className="font-display mb-2 w-full rounded-[20px] border border-zinc-300 bg-transparent px-3 py-2 text-center text-black placeholder:text-zinc-400 dark:border-zinc-700 dark:text-zinc-50"
+                style={{ fontSize: cover(14) }}
+              />
+              {submitError && (
+                <p
+                  className="font-display mb-2 text-red-600 dark:text-red-400"
+                  style={{ fontSize: cover(12) }}
+                >
+                  {submitError}
+                </p>
+              )}
               <div className="flex w-full gap-2">
                 <button
                   onClick={retake}
-                  className="font-display flex-1 rounded-[20px] border border-zinc-300 py-2 text-black dark:border-zinc-700 dark:text-zinc-50"
+                  disabled={isSubmitting}
+                  className="font-display flex-1 rounded-[20px] border border-zinc-300 py-2 text-black disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-50"
                   style={{ fontSize: cover(14) }}
                 >
                   retake
                 </button>
                 <button
-                  onClick={submit}
-                  className="font-display flex-1 rounded-[20px] bg-black py-2 text-white"
+                  onClick={() => void submit()}
+                  disabled={isSubmitting}
+                  className="font-display flex-1 rounded-[20px] bg-black py-2 text-white disabled:opacity-40"
                   style={{ fontSize: cover(14) }}
                 >
-                  submit
+                  {isSubmitting ? "submitting…" : "submit"}
                 </button>
               </div>
             </div>
@@ -764,14 +1300,6 @@ export default function RecordPage() {
           )}
         </div>
 
-        <audio
-          ref={audioRef}
-          src={TRACK.audioUrl}
-          onPlay={() => setIsPlaying(true)}
-          onPause={() => setIsPlaying(false)}
-          onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
-          onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
-        />
       </div>
 
       <p className="font-display pointer-events-none absolute bottom-6 right-6 text-5xl font-medium text-black sm:text-6xl md:text-7xl lg:text-8xl dark:text-zinc-50">
