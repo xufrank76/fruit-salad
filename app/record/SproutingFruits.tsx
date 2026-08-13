@@ -18,24 +18,28 @@ export type SproutedFruit = {
   boilMs: number;
 };
 
-// Fixed cycling order (not Object.keys(FRUIT_BOIL_CLASS), which is alphabetical
-// and can land the same kind in adjacent slots) so neighbouring fruits always
-// read as a varied sequence instead of clustering by chance.
+// Fixed cycling order (apple, orange, lemon, pear, blueberry). The kind is
+// chosen by contribution index, so fruits always come out in this repeating
+// sequence rather than at random.
 const KIND_ORDER: FruitKind[] = ["apple", "orange", "lemon", "pear", "blueberry"];
 
-// Placement area, kept inside the 1280x832 design canvas (not flush with the
-// true edges) so slots stay visible even when cover() scaling crops the canvas
-// edges on wide/narrow viewports.
-const X_MARGIN = 70;
-const Y_TOP = 110;
-const Y_BOTTOM = 720;
-const USABLE_W = 1280 - X_MARGIN * 2;
-const USABLE_H = Y_BOTTOM - Y_TOP;
+// The 1280x832 design canvas. Placement uses the FULL canvas (no inner margin):
+// fruits are allowed to jitter past the true edges so the field bleeds off the
+// frame the way the hand-scattered homepage FruitField does under cover().
+const W = 1280;
+const H = 832;
 
-// Deterministic per-index pseudo-random (mulberry32). slotFruit runs during
-// render now (fruits are derived from the taken lines), so it must be pure —
-// Math.random() would reshuffle positions every poll and risk an SSR/client
-// hydration mismatch. Seeding by line index makes each line's fruit stable.
+// Vertical span the rows are laid out across. The TOP is above the frame so the
+// last (top) row bleeds off the top like the homepage field; the BOTTOM is kept
+// inside the frame so the first-filled (bottom) row sits mostly on-screen — with
+// big fruits, a center right at the edge would hang half off, so we hold it in.
+const Y_TOP = -80;
+const Y_BOTTOM = 745;
+
+// Deterministic pseudo-random (mulberry32). slotFruit runs during render
+// (fruits are derived from the taken lines), so it must be pure — Math.random()
+// would reshuffle positions every poll and risk an SSR/client hydration
+// mismatch. Seeding by index/total makes each line's fruit stable across polls.
 function rngFor(seed: number): () => number {
   let a = (seed + 1) * 0x6d2b79f5;
   return () => {
@@ -47,39 +51,72 @@ function rngFor(seed: number): () => number {
   };
 }
 
-// A near-square grid sized to `total` lines, so the fruits spread across the
-// whole placement area and end up evenly covering it once every line is sung.
-function gridFor(total: number) {
-  const n = Math.max(1, total);
-  const cols = Math.max(1, Math.round(Math.sqrt((n * USABLE_W) / USABLE_H)));
-  const rows = Math.ceil(n / cols);
-  return { cols, rows, cellW: USABLE_W / cols, cellH: USABLE_H / rows };
+// A jittered grid sized to the song's total lines: enough cells to hold every
+// line, in a layout that roughly matches the canvas aspect so coverage stays
+// even. Deterministic (seeded only by `total`), so it's identical on server and
+// client and stable across polls.
+function gridDims(total: number): { cols: number; rows: number } {
+  const cols = Math.max(1, Math.round(Math.sqrt(total * (W / H))));
+  const rows = Math.max(1, Math.ceil(total / cols));
+  return { cols, rows };
 }
 
-// Places the fruit for line `index` (of `total` lines) in its own grid cell,
-// filling bottom row to top so the field grows upward as lines get sung.
+// Seeded Fisher-Yates permutation of [0..n).
+function shuffledCells(n: number, seed: number): number[] {
+  const rand = rngFor(seed);
+  const arr = Array.from({ length: n }, (_, i) => i);
+  for (let i = n - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+// The order grid cells are handed out to filling lines: bottom row first, then
+// climbing row by row, with the columns *within* each row shuffled so the
+// horizontal position is random. So the field fills bottom-to-top as the song
+// fills, each new row scattered across the width, and covers the whole canvas
+// once every line is sung. Seeded only by `total`, so it's stable and identical
+// on server and client.
+function cellOrder(cols: number, rows: number): number[] {
+  const order: number[] = [];
+  for (let row = rows - 1; row >= 0; row--) {
+    for (const col of shuffledCells(cols, cols * (row + 1) + 1)) {
+      order.push(row * cols + col);
+    }
+  }
+  return order;
+}
+
+// Places the fruit for contribution `index` (of `total` lines). Each line takes
+// the next cell of a jittered grid in bottom-to-top, random-column order (see
+// cellOrder), then is offset within/past its cell by a strong random jitter.
+// The result is a loose hand-scattered pile — varied kinds, sizes and rotations,
+// bleeding off the frame edges — that rises as the song fills and, once every
+// line is sung, covers the whole canvas the way the homepage FruitField does.
+// Seeded per index, so positions stay put across polls; edge bleed under
+// cover() is fine/expected.
 export function slotFruit(index: number, total: number): SproutedFruit {
   const rand = rngFor(index);
-  const { cols, cellW, cellH } = gridFor(total);
-  const row = Math.floor(index / cols);
-  const col = index % cols;
+  const { cols, rows } = gridDims(total);
+  const cell = cellOrder(cols, rows)[index % (cols * rows)];
+  const cellW = W / cols;
+  // Rows are laid out from Y_TOP to Y_BOTTOM (see their comment above).
+  const cellH = (Y_BOTTOM - Y_TOP) / rows;
+  const col = cell % cols;
+  const row = Math.floor(cell / cols);
 
-  const cx = X_MARGIN + col * cellW + cellW / 2;
-  const cy = Y_BOTTOM - (row * cellH + cellH / 2); // row 0 = bottom
-
-  // Slightly larger than a cell so neighbours overlap into a full, bowl-like
-  // field rather than a tidy checkerboard.
-  const base = Math.min(cellW, cellH);
-  const size = base * (1.2 + rand() * 0.5);
-  const jitterX = cellW * 0.16 * (rand() * 2 - 1);
-  const jitterY = cellH * 0.16 * (rand() * 2 - 1);
+  // ±0.55 of a cell of jitter breaks up the grid and lets edge fruits spill
+  // off the canvas, so it never reads as a lattice.
+  const cx = (col + 0.5) * cellW + (rand() * 2 - 1) * cellW * 0.55;
+  const cy = Y_TOP + (row + 0.5) * cellH + (rand() * 2 - 1) * cellH * 0.55;
 
   return {
     id: index,
     kind: KIND_ORDER[index % KIND_ORDER.length],
-    x: cx + jitterX,
-    y: cy + jitterY,
-    size,
+    x: cx,
+    y: cy,
+    size: 160 + rand() * 75,
     rotateDeg: rand() * 30 - 15,
     boilMs: 800 + rand() * 500,
   };

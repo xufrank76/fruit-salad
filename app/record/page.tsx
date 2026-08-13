@@ -69,6 +69,9 @@ type Take = {
   offset_ms: number | null;
   duration_ms: number | null;
   singer_name: string | null;
+  // When the take was recorded — used to order the background fruits by
+  // contribution order (the API returns select("*"), so this is present).
+  created_at: string | null;
 };
 type DbLine = {
   id: string;
@@ -454,15 +457,22 @@ export default function RecordPage() {
 
   // One background fruit per taken line — everyone's contributions, not just
   // yours. Derived from dbLines (which the live poll keeps current), so a fruit
-  // appears the moment any line is filled and disappears when it's deleted;
-  // the grid is sized to the song's total lines, so the field fills evenly and
-  // covers the canvas once every line is sung. Deterministic per line index
-  // (see slotFruit), so positions stay put across polls and re-renders.
+  // appears the moment any line is filled and disappears when it's deleted.
+  // Ordered by *contribution order* (take created_at) and placed by that rank,
+  // so fruits fill bottom-to-top row by row in the order lines were sung, with
+  // the kind cycling apple/orange/lemon/pear/blueberry as they rise. The grid
+  // is sized to the song's total lines, so it covers the canvas evenly once
+  // every line is sung.
   const bgFruits = useMemo<SproutedFruit[]>(() => {
     const total = dbLines.length || lines.length;
-    return dbLines
-      .filter((l) => l.take)
-      .map((l) => slotFruit(l.idx, total));
+    const taken = dbLines.filter((l) => l.take);
+    taken.sort((a, b) => {
+      const ta = a.take?.created_at ?? "";
+      const tb = b.take?.created_at ?? "";
+      if (ta !== tb) return ta < tb ? -1 : 1;
+      return a.idx - b.idx; // stable tiebreak for same-instant takes
+    });
+    return taken.map((_, rank) => slotFruit(rank, total));
   }, [dbLines, lines.length]);
 
   const hasTimestamps =
