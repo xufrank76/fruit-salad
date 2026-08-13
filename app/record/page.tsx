@@ -977,7 +977,21 @@ export default function RecordPage() {
           </button>
         </div>
 
-        {/* Transport + progress */}
+        {/* Lyrics — fills remaining space, scrolls internally */}
+        <div className="min-h-0 flex-1 px-4 pt-3">
+          <RecordLinesPanel
+            lines={lines}
+            currentIndex={currentIndex}
+            takenLines={takenLines}
+            takenBy={takenBy}
+            selectedIndices={selectedIndices}
+            onToggleLine={toggleLine}
+            onSeekLine={seekToLine}
+            disabled={panelState !== "idle"}
+          />
+        </div>
+
+        {/* Transport + progress — below the lyrics */}
         <div className="flex items-center justify-center gap-10 px-4 pt-3">
           <button
             onClick={() => skip(-10)}
@@ -1007,24 +1021,10 @@ export default function RecordPage() {
             <FastForward size={22} />
           </button>
         </div>
-        <div className="mx-4 mt-3 h-[5px] overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800">
+        <div className="mx-4 mb-1 mt-3 h-[5px] overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800">
           <div
             className="h-full rounded-full bg-black dark:bg-white"
             style={{ width: duration ? `${(currentTime / duration) * 100}%` : "0%" }}
-          />
-        </div>
-
-        {/* Lyrics — fills remaining space, scrolls internally */}
-        <div className="min-h-0 flex-1 px-4 py-3">
-          <RecordLinesPanel
-            lines={lines}
-            currentIndex={currentIndex}
-            takenLines={takenLines}
-            takenBy={takenBy}
-            selectedIndices={selectedIndices}
-            onToggleLine={toggleLine}
-            onSeekLine={seekToLine}
-            disabled={panelState !== "idle"}
           />
         </div>
 
