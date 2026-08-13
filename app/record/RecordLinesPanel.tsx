@@ -1,6 +1,6 @@
 "use client";
 
-import { CircleCheck, CirclePlus } from "lucide-react";
+import { CircleCheck, CirclePlus, Trash2 } from "lucide-react";
 import { useEffect, useRef } from "react";
 
 export default function RecordLinesPanel({
@@ -11,6 +11,9 @@ export default function RecordLinesPanel({
   selectedIndices,
   onToggleLine,
   onSeekLine,
+  deletableLines,
+  onDeleteLine,
+  deletingLine,
   disabled,
 }: {
   lines: string[];
@@ -20,6 +23,11 @@ export default function RecordLinesPanel({
   selectedIndices: Set<number>;
   onToggleLine: (index: number) => void;
   onSeekLine?: (index: number) => void;
+  // Lines whose take you recorded on this device, plus a handler to delete
+  // one. `deletingLine` is the index currently being deleted (disables it).
+  deletableLines?: Set<number>;
+  onDeleteLine?: (index: number) => void;
+  deletingLine?: number | null;
   disabled: boolean;
 }) {
   const activeRef = useRef<HTMLDivElement>(null);
@@ -42,6 +50,7 @@ export default function RecordLinesPanel({
         {lines.map((line, i) => {
           const taken = takenLines.has(i);
           const selected = selectedIndices.has(i);
+          const deletable = taken && !!onDeleteLine && !!deletableLines?.has(i);
           return (
             <div
               key={i}
@@ -61,9 +70,25 @@ export default function RecordLinesPanel({
                 {line}
               </p>
               {taken ? (
-                <span className="font-display shrink-0 whitespace-nowrap text-[11px] text-red-200/40">
-                  {takenBy[i] ?? "taken"}
-                </span>
+                deletable ? (
+                  <div className="flex shrink-0 items-center gap-2">
+                    <span className="font-display whitespace-nowrap text-[11px] text-red-200/40">
+                      {takenBy[i] ?? "you"}
+                    </span>
+                    <button
+                      disabled={deletingLine === i}
+                      onClick={() => onDeleteLine?.(i)}
+                      aria-label="Delete your recording for this line"
+                      className="text-red-200/50 hover:text-white disabled:opacity-40"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
+                ) : (
+                  <span className="font-display shrink-0 whitespace-nowrap text-[11px] text-red-200/40">
+                    {takenBy[i] ?? "taken"}
+                  </span>
+                )
               ) : selected ? (
                 <button
                   disabled={disabled}

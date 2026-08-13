@@ -51,3 +51,50 @@ export async function POST(request: Request) {
 
   return NextResponse.json({ take });
 }
+
+// Deletes a submitted take (its DB row and the uploaded audio), reopening the
+// line so it can be sung again. Ownership is enforced client-side (the record
+// page only offers delete for takes it created on this device); there's no
+// auth, so this endpoint trusts the take id it's given.
+export async function DELETE(request: Request) {
+  let takeId: unknown;
+  try {
+    ({ takeId } = await request.json());
+  } catch {
+    takeId = undefined;
+  }
+  if (typeof takeId !== "string" || !takeId) {
+    return NextResponse.json({ error: "Missing take id" }, { status: 400 });
+  }
+
+  // Look up the audio file so we can remove it from Storage too, not just the
+  // row (otherwise the WAV is orphaned in the bucket forever).
+  const { data: take } = await supabaseServer
+    .from("takes")
+    .select("audio_url")
+    .eq("id", takeId)
+    .maybeSingle();
+
+  if (take?.audio_url) {
+    // Public URL is .../object/public/takes/<path>; the bucket-relative path is
+    // everything after "/takes/".
+    const path = take.audio_url.split("/takes/")[1];
+    if (path) {
+      // Best-effort: a failed file delete shouldn't block removing the row.
+      await supabaseServer.storage
+        .from("takes")
+        .remove([decodeURIComponent(path)]);
+    }
+  }
+
+  const { error: deleteError } = await supabaseServer
+    .from("takes")
+    .delete()
+    .eq("id", takeId);
+
+  if (deleteError) {
+    return NextResponse.json({ error: deleteError.message }, { status: 500 });
+  }
+
+  return NextResponse.json({ ok: true });
+}

@@ -92,6 +92,23 @@ export default function RecordPage() {
   // lines survive refresh and show up for everyone.
   const [renditionId, setRenditionId] = useState<string | null>(null);
   const [dbLines, setDbLines] = useState<DbLine[]>([]);
+  // Ids of takes recorded from THIS device — the only ones we offer to delete,
+  // since there's no auth to prove ownership otherwise. Persisted so your
+  // recordings stay deletable across refreshes. Initialized straight from
+  // localStorage (window-guarded for SSR): safe from a hydration mismatch
+  // because taken rows only render after the async rendition fetch resolves,
+  // well after hydration. An effect-based load here would race the persist
+  // effect below and clobber the saved ids on mount.
+  const [myTakeIds, setMyTakeIds] = useState<Set<string>>(() => {
+    if (typeof window === "undefined") return new Set();
+    try {
+      const raw = localStorage.getItem("fruitsalad:myTakeIds");
+      const ids = raw ? JSON.parse(raw) : [];
+      return new Set<string>(Array.isArray(ids) ? ids : []);
+    } catch {
+      return new Set();
+    }
+  });
   const [singerName, setSingerName] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -217,6 +234,24 @@ export default function RecordPage() {
     }
     return by;
   }, [dbLines]);
+
+  // Keep the persisted set of your own takes in sync (see myTakeIds).
+  useEffect(() => {
+    localStorage.setItem(
+      "fruitsalad:myTakeIds",
+      JSON.stringify([...myTakeIds])
+    );
+  }, [myTakeIds]);
+
+  // Lines whose take was recorded on this device — the ones we offer a delete
+  // control for in the lyrics list.
+  const deletableLines = useMemo(() => {
+    const s = new Set<number>();
+    for (const l of dbLines) {
+      if (l.take && myTakeIds.has(l.take.id)) s.add(l.idx);
+    }
+    return s;
+  }, [dbLines, myTakeIds]);
 
   useEffect(() => {
     let cancelled = false;
@@ -855,6 +890,12 @@ export default function RecordPage() {
         setDbLines((prev) =>
           prev.map((l) => (l.id === dbLine.id ? { ...l, take } : l))
         );
+        setMyTakeIds((prev) => {
+          if (prev.has(take.id)) return prev;
+          const next = new Set(prev);
+          next.add(take.id);
+          return next;
+        });
       }
       sproutAndFinish(indices.length);
     } catch (e) {
@@ -871,6 +912,47 @@ export default function RecordPage() {
     singerName,
     sproutAndFinish,
   ]);
+
+  const [deletingLine, setDeletingLine] = useState<number | null>(null);
+
+  // Removes a take you submitted from this device: deletes it on the backend,
+  // reopens the line locally, forgets the id, and pops one background fruit so
+  // the field still tracks the number of filled lines.
+  const deleteTake = useCallback(
+    async (idx: number) => {
+      const line = dbLines.find((l) => l.idx === idx);
+      const takeId = line?.take?.id;
+      if (!line || !takeId || deletingLine !== null) return;
+      setDeletingLine(idx);
+      try {
+        const res = await fetch("/api/takes", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ takeId }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => null);
+          throw new Error(body?.error ?? `Delete failed (${res.status})`);
+        }
+        setDbLines((prev) =>
+          prev.map((l) => (l.id === line.id ? { ...l, take: null } : l))
+        );
+        setMyTakeIds((prev) => {
+          if (!prev.has(takeId)) return prev;
+          const next = new Set(prev);
+          next.delete(takeId);
+          return next;
+        });
+        setBgFruits((prev) => prev.slice(0, -1));
+        filledSlotsRef.current = Math.max(0, filledSlotsRef.current - 1);
+      } catch (e) {
+        setSubmitError("Could not delete your take: " + String(e));
+      } finally {
+        setDeletingLine(null);
+      }
+    },
+    [dbLines, deletingLine]
+  );
 
   const isMobile = useSyncExternalStore(
     subscribeMobile,
@@ -987,6 +1069,9 @@ export default function RecordPage() {
             selectedIndices={selectedIndices}
             onToggleLine={toggleLine}
             onSeekLine={seekToLine}
+            deletableLines={deletableLines}
+            onDeleteLine={deleteTake}
+            deletingLine={deletingLine}
             disabled={panelState !== "idle"}
           />
         </div>
@@ -1106,6 +1191,9 @@ export default function RecordPage() {
             selectedIndices={selectedIndices}
             onToggleLine={toggleLine}
             onSeekLine={seekToLine}
+            deletableLines={deletableLines}
+            onDeleteLine={deleteTake}
+            deletingLine={deletingLine}
             disabled={panelState !== "idle"}
           />
         </div>
