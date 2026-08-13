@@ -1,9 +1,16 @@
 "use client";
 
-import { ArrowLeft, Check, Mic, Pause, Play, Rewind, FastForward } from "lucide-react";
+import { ArrowLeft, Rewind, FastForward } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import {
   audioBufferToWavBlob,
   getAudioContext,
@@ -19,6 +26,18 @@ import { CANVAS_HEIGHT, CANVAS_WIDTH, cover } from "../coverUnit";
 import FruitField from "../FruitField";
 import RecordLinesPanel from "./RecordLinesPanel";
 import SproutingFruits, { slotFruit, type SproutedFruit } from "./SproutingFruits";
+import RecordControlPanel from "./RecordControlPanel";
+
+// The fixed cover-canvas desktop layout puts the lyrics and record panels
+// side by side — unusable on a portrait phone, where it scales by height and
+// runs off both edges. Below this width we render a stacked mobile layout
+// instead. useSyncExternalStore keeps it SSR-safe (server assumes desktop).
+const MOBILE_QUERY = "(max-width: 1023px)";
+function subscribeMobile(cb: () => void) {
+  const mq = window.matchMedia(MOBILE_QUERY);
+  mq.addEventListener("change", cb);
+  return () => mq.removeEventListener("change", cb);
+}
 
 const RECORD_SONG_GAIN = 0.35; // duck the backing track while you sing over it
 const MIN_LEAD_IN_SEC = 2; // guaranteed minimum pre-roll
@@ -853,6 +872,17 @@ export default function RecordPage() {
     sproutAndFinish,
   ]);
 
+  const isMobile = useSyncExternalStore(
+    subscribeMobile,
+    () => window.matchMedia(MOBILE_QUERY).matches,
+    () => false
+  );
+
+  const handleSingerNameChange = useCallback((value: string) => {
+    setSingerName(value);
+    localStorage.setItem("fruitsalad:singerName", value);
+  }, []);
+
   const togglePlay = () => {
     if (panelState !== "idle") return;
     if (isPlaying) pauseMainPlayback();
@@ -876,6 +906,123 @@ export default function RecordPage() {
       return next;
     });
   };
+
+  // Everything the control panel needs except `sz` (the sizing function) —
+  // desktop passes cover(), mobile passes plain px, same markup either way.
+  const controlPanelProps = {
+    micError,
+    panelState,
+    selectedList,
+    lines,
+    cue,
+    waveLevels,
+    onBeginRecording: () => void beginRecording(),
+    onClearSelection: clearSelection,
+    onCancel: cancelFlow,
+    isReviewPlaying,
+    playbackPct,
+    reviewBarRef,
+    onToggleReviewPlayback: toggleReviewPlayback,
+    onSeekReview: seekReview,
+    syncNudgeMs,
+    syncMin: SYNC_NUDGE_MIN_MS,
+    syncMax: SYNC_NUDGE_MAX_MS,
+    onApplySync: applySync,
+    onCommitSync: commitSync,
+    onResetSync: resetSync,
+    singerName,
+    onSingerNameChange: handleSingerNameChange,
+    submitError,
+    isSubmitting,
+    onRetake: retake,
+    onSubmit: () => void submit(),
+  };
+
+  const transportDisabled = panelState !== "idle" || playbackLoading;
+
+  if (isMobile) {
+    return (
+      <div className="flex h-dvh w-full flex-col overflow-hidden bg-white dark:bg-black">
+        {/* Header: back, title/artist, mute */}
+        <div className="flex items-center gap-3 px-4 pt-4">
+          <Link href="/salad" className="shrink-0 text-black dark:text-zinc-100">
+            <ArrowLeft size={24} />
+          </Link>
+          <div className="font-display min-w-0 flex-1">
+            <p className="truncate text-lg font-medium leading-tight text-black dark:text-zinc-50">
+              {TRACK.title}
+            </p>
+            <p className="truncate text-sm leading-tight text-zinc-500 dark:text-zinc-400">
+              {TRACK.artist}
+            </p>
+          </div>
+          <button
+            onClick={toggleMute}
+            disabled={takeWindows.length === 0}
+            className="font-display shrink-0 rounded-full border border-zinc-300 bg-white px-3 py-1.5 text-sm text-black disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50"
+          >
+            {muted ? "unmute" : "mute others"}
+          </button>
+        </div>
+
+        {/* Transport + progress */}
+        <div className="flex items-center justify-center gap-10 px-4 pt-3">
+          <button
+            onClick={() => skip(-10)}
+            disabled={transportDisabled}
+            className="text-black disabled:opacity-40 dark:text-zinc-100"
+          >
+            <Rewind size={22} />
+          </button>
+          <button
+            onClick={togglePlay}
+            disabled={transportDisabled}
+            className="relative h-14 w-14 shrink-0 disabled:opacity-40"
+          >
+            <Image
+              src={isPlaying ? "/fruit/pause-button.png" : "/fruit/play-button.png"}
+              alt={isPlaying ? "Pause" : "Play"}
+              fill
+              className="select-none object-contain"
+              draggable={false}
+            />
+          </button>
+          <button
+            onClick={() => skip(10)}
+            disabled={transportDisabled}
+            className="text-black disabled:opacity-40 dark:text-zinc-100"
+          >
+            <FastForward size={22} />
+          </button>
+        </div>
+        <div className="mx-4 mt-3 h-[5px] overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800">
+          <div
+            className="h-full rounded-full bg-black dark:bg-white"
+            style={{ width: duration ? `${(currentTime / duration) * 100}%` : "0%" }}
+          />
+        </div>
+
+        {/* Lyrics — fills remaining space, scrolls internally */}
+        <div className="min-h-0 flex-1 px-4 py-3">
+          <RecordLinesPanel
+            lines={lines}
+            currentIndex={currentIndex}
+            takenLines={takenLines}
+            takenBy={takenBy}
+            selectedIndices={selectedIndices}
+            onToggleLine={toggleLine}
+            onSeekLine={seekToLine}
+            disabled={panelState !== "idle"}
+          />
+        </div>
+
+        {/* Record control panel — pinned at the bottom, scrolls if tall */}
+        <div className="flex max-h-[46vh] shrink-0 flex-col items-center justify-center overflow-y-auto border-t border-zinc-200 px-6 py-4 text-center dark:border-zinc-800">
+          <RecordControlPanel sz={(n) => `${n}px`} {...controlPanelProps} />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="relative h-dvh w-full overflow-hidden bg-white dark:bg-black">
@@ -1002,302 +1149,7 @@ export default function RecordPage() {
           className="absolute flex flex-col items-center justify-center overflow-hidden rounded-[20px] border border-zinc-200 bg-white px-8 text-center dark:border-zinc-800 dark:bg-zinc-950"
           style={{ left: cover(660), top: cover(179), width: cover(473), height: cover(394) }}
         >
-          {micError && (
-            <p
-              className="font-display mb-3 text-red-600 dark:text-red-400"
-              style={{ fontSize: cover(14) }}
-            >
-              {micError}
-            </p>
-          )}
-
-          {panelState === "idle" && selectedList.length === 0 && (
-            <>
-              <Mic
-                className="text-zinc-400 dark:text-zinc-600"
-                style={{ width: cover(48), height: cover(48) }}
-              />
-              <p
-                className="font-display mt-3 text-zinc-500 dark:text-zinc-400"
-                style={{ fontSize: cover(16) }}
-              >
-                add open lines on the left to contribute
-              </p>
-            </>
-          )}
-
-          {panelState === "idle" && selectedList.length > 0 && (
-            <>
-              <p
-                className="font-display text-zinc-500 dark:text-zinc-400"
-                style={{ fontSize: cover(13) }}
-              >
-                your line{selectedList.length > 1 ? "s" : ""}
-              </p>
-              <div
-                className="mb-4 mt-1 max-w-xs overflow-y-auto"
-                style={{ maxHeight: cover(90) }}
-              >
-                {selectedList.map((i) => (
-                  <p
-                    key={i}
-                    className="font-display font-medium text-black dark:text-zinc-50"
-                    style={{ fontSize: cover(16) }}
-                  >
-                    &quot;{lines[i]}&quot;
-                  </p>
-                ))}
-              </div>
-              <button
-                onClick={() => void beginRecording()}
-                className="mb-2 flex items-center justify-center rounded-full bg-black text-white"
-                style={{ width: cover(60), height: cover(60) }}
-              >
-                <Mic style={{ width: cover(24), height: cover(24) }} />
-              </button>
-              <p
-                className="font-display text-zinc-500 dark:text-zinc-400"
-                style={{ fontSize: cover(12) }}
-              >
-                tap when ready
-              </p>
-              <button
-                onClick={clearSelection}
-                className="font-display mt-3 text-zinc-400 underline dark:text-zinc-600"
-                style={{ fontSize: cover(12) }}
-              >
-                clear selection
-              </button>
-            </>
-          )}
-
-          {panelState === "recording" && (
-            <>
-              {cue.mode === "sing" ? (
-                <>
-                  <p
-                    className="font-display mb-4 font-medium text-red-600 dark:text-red-400"
-                    style={{ fontSize: cover(20) }}
-                  >
-                    sing!
-                  </p>
-                  <div
-                    className="mb-4 flex items-end justify-center"
-                    style={{ gap: cover(3), height: cover(48) }}
-                  >
-                    {waveLevels.map((lvl, i) => (
-                      <div
-                        key={i}
-                        className="w-1 rounded-full bg-red-500"
-                        style={{ height: `${Math.max(8, lvl * 48)}px` }}
-                      />
-                    ))}
-                  </div>
-                  <div
-                    className="max-w-xs overflow-y-auto"
-                    style={{ maxHeight: cover(70) }}
-                  >
-                    {selectedList.map((i) => (
-                      <p
-                        key={i}
-                        className="font-display text-zinc-500 dark:text-zinc-400"
-                        style={{ fontSize: cover(12) }}
-                      >
-                        &quot;{lines[i]}&quot;
-                      </p>
-                    ))}
-                  </div>
-                </>
-              ) : cue.mode === "wrap" ? (
-                <>
-                  <Check
-                    className="mb-2 text-green-600 dark:text-green-400"
-                    style={{ width: cover(32), height: cover(32) }}
-                  />
-                  <p
-                    className="font-display font-medium text-black dark:text-zinc-50"
-                    style={{ fontSize: cover(16) }}
-                  >
-                    nice take!
-                  </p>
-                </>
-              ) : (
-                <>
-                  <p
-                    className="font-display mb-2 text-zinc-500 dark:text-zinc-400"
-                    style={{ fontSize: cover(13) }}
-                  >
-                    get ready
-                  </p>
-                  <p
-                    className="font-display font-medium text-black dark:text-zinc-50"
-                    style={{ fontSize: cover(56) }}
-                  >
-                    {cue.mode === "countin" ? cue.label : ""}
-                  </p>
-                </>
-              )}
-              {cue.mode !== "wrap" && (
-                <button
-                  onClick={cancelFlow}
-                  className="font-display mt-3 text-zinc-400 underline dark:text-zinc-600"
-                  style={{ fontSize: cover(12) }}
-                >
-                  cancel
-                </button>
-              )}
-            </>
-          )}
-
-          {panelState === "review" && (
-            <div className="w-full max-w-[280px]">
-              <p
-                className="font-display font-medium text-black dark:text-zinc-50"
-                style={{ fontSize: cover(16) }}
-              >
-                nice take!
-              </p>
-              <div
-                className="mb-4 mt-1 overflow-y-auto"
-                style={{ maxHeight: cover(80) }}
-              >
-                {selectedList.map((i) => (
-                  <p
-                    key={i}
-                    className="font-display font-medium text-black dark:text-zinc-50"
-                    style={{ fontSize: cover(16) }}
-                  >
-                    &quot;{lines[i]}&quot;
-                  </p>
-                ))}
-              </div>
-              <div
-                className="font-display mb-4 flex w-full items-center gap-2 rounded-[20px] border border-zinc-300 py-2 pl-3 pr-4 text-black dark:border-zinc-700 dark:text-zinc-50"
-                style={{ fontSize: cover(14) }}
-              >
-                <button
-                  onClick={toggleReviewPlayback}
-                  aria-label={isReviewPlaying ? "Pause" : "Play"}
-                  className="flex shrink-0 items-center justify-center"
-                >
-                  {isReviewPlaying ? (
-                    <Pause size={14} fill="currentColor" />
-                  ) : (
-                    <Play size={14} fill="currentColor" />
-                  )}
-                </button>
-                {/* Scrubbable: click or drag to seek, whether paused or playing. */}
-                <div
-                  ref={reviewBarRef}
-                  onPointerDown={(e) => {
-                    e.currentTarget.setPointerCapture(e.pointerId);
-                    seekReview(e.clientX);
-                  }}
-                  onPointerMove={(e) => {
-                    if (e.buttons !== 1) return;
-                    seekReview(e.clientX);
-                  }}
-                  className="relative h-2 flex-1 cursor-pointer touch-none overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800"
-                >
-                  <span
-                    className="absolute inset-y-0 left-0 bg-black dark:bg-white"
-                    style={{ width: `${playbackPct * 100}%` }}
-                  />
-                </div>
-                <span className="shrink-0 text-zinc-500 dark:text-zinc-400">
-                  {isReviewPlaying ? "looping…" : playbackPct > 0 ? "paused" : "play it back"}
-                </span>
-              </div>
-              {/* Sync calibration: play the take (it loops) and drag until your
-                  voice lands on the beat. The end labels tell you which way to
-                  drag based on what you hear, so no mental math. */}
-              <div className="font-display mb-3 w-full">
-                <div
-                  className="mb-1 flex items-center justify-between text-zinc-500 dark:text-zinc-400"
-                  style={{ fontSize: cover(12) }}
-                >
-                  <span>voice off the beat?</span>
-                  <button
-                    onClick={resetSync}
-                    className="underline hover:text-black dark:hover:text-zinc-50"
-                  >
-                    reset
-                  </button>
-                </div>
-                <input
-                  type="range"
-                  min={SYNC_NUDGE_MIN_MS}
-                  max={SYNC_NUDGE_MAX_MS}
-                  step={5}
-                  value={syncNudgeMs}
-                  onChange={(e) => applySync(Number(e.target.value))}
-                  onPointerUp={commitSync}
-                  onKeyUp={commitSync}
-                  aria-label="voice timing"
-                  className="w-full cursor-pointer accent-black dark:accent-white"
-                />
-                <div
-                  className="flex items-center justify-between text-zinc-400 dark:text-zinc-600"
-                  style={{ fontSize: cover(11) }}
-                >
-                  <span>← drag if voice is early</span>
-                  <span>drag if voice is late →</span>
-                </div>
-              </div>
-              <input
-                value={singerName}
-                onChange={(e) => {
-                  setSingerName(e.target.value);
-                  localStorage.setItem("fruitsalad:singerName", e.target.value);
-                }}
-                placeholder="your name (optional)"
-                maxLength={30}
-                className="font-display mb-2 w-full rounded-[20px] border border-zinc-300 bg-transparent px-3 py-2 text-center text-black placeholder:text-zinc-400 dark:border-zinc-700 dark:text-zinc-50"
-                style={{ fontSize: cover(14) }}
-              />
-              {submitError && (
-                <p
-                  className="font-display mb-2 text-red-600 dark:text-red-400"
-                  style={{ fontSize: cover(12) }}
-                >
-                  {submitError}
-                </p>
-              )}
-              <div className="flex w-full gap-2">
-                <button
-                  onClick={retake}
-                  disabled={isSubmitting}
-                  className="font-display flex-1 rounded-[20px] border border-zinc-300 py-2 text-black disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-50"
-                  style={{ fontSize: cover(14) }}
-                >
-                  retake
-                </button>
-                <button
-                  onClick={() => void submit()}
-                  disabled={isSubmitting}
-                  className="font-display flex-1 rounded-[20px] bg-black py-2 text-white disabled:opacity-40"
-                  style={{ fontSize: cover(14) }}
-                >
-                  {isSubmitting ? "submitting…" : "submit"}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {panelState === "success" && (
-            <>
-              <Check
-                className="text-green-600 dark:text-green-400"
-                style={{ width: cover(32), height: cover(32) }}
-              />
-              <p
-                className="font-display mt-2 text-zinc-500 dark:text-zinc-400"
-                style={{ fontSize: cover(14) }}
-              >
-                added to the salad
-              </p>
-            </>
-          )}
+          <RecordControlPanel sz={cover} {...controlPanelProps} />
         </div>
 
       </div>
