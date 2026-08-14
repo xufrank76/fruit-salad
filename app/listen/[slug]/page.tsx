@@ -69,7 +69,6 @@ function ListenPageInner() {
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackLoading, setPlaybackLoading] = useState(false);
-  const [muted, setMuted] = useState(false);
 
   const songBufferRef = useRef<AudioBuffer | null>(null);
   const activeSourcesRef = useRef<AudioScheduledSourceNode[]>([]);
@@ -80,12 +79,7 @@ function ListenPageInner() {
   const backingGainRef = useRef<GainNode | null>(null);
   const takesGainRef = useRef<GainNode | null>(null);
   const takeBufferCacheRef = useRef<Map<string, AudioBuffer>>(new Map());
-  const mutedRef = useRef(false);
   const syncNudgeRef = useRef(DEFAULT_SYNC_NUDGE_MS);
-
-  useEffect(() => {
-    mutedRef.current = muted;
-  }, [muted]);
 
   useEffect(() => {
     if (!song) return;
@@ -313,7 +307,7 @@ function ListenPageInner() {
       activeSourcesRef.current.push(songSource);
 
       const takesGain = ctx.createGain();
-      takesGain.gain.value = mutedRef.current ? 0 : 1;
+      takesGain.gain.value = 1;
       takesGain.connect(ctx.destination);
 
       for (const { take, startSec, endSec } of windows) {
@@ -344,9 +338,7 @@ function ListenPageInner() {
           return;
         }
         setCurrentTime(pos);
-        const ducked =
-          !mutedRef.current &&
-          windows.some((w) => pos >= w.startSec && pos < w.endSec);
+        const ducked = windows.some((w) => pos >= w.startSec && pos < w.endSec);
         backingGain.gain.setTargetAtTime(
           ducked ? RECORD_SONG_GAIN : 1,
           ctx.currentTime,
@@ -369,17 +361,6 @@ function ListenPageInner() {
     const target = Math.max(0, Math.min(songBuffer.duration, currentTime + deltaSec));
     if (isPlaying) void startPlayback(target);
     else setCurrentTime(target);
-  };
-  const toggleMute = () => {
-    setMuted((prev) => {
-      const next = !prev;
-      takesGainRef.current?.gain.setTargetAtTime(
-        next ? 0 : 1,
-        getAudioContext().currentTime,
-        0.08
-      );
-      return next;
-    });
   };
 
   const prevLine = currentIndex > 0 ? lines[currentIndex - 1] : null;
@@ -414,7 +395,7 @@ function ListenPageInner() {
       <div className="relative z-10 flex h-full w-full flex-col">
         <div className="flex items-center justify-between gap-3 px-4 pt-4 sm:px-8 sm:pt-6">
           <Link
-            href={viewingPast ? "/gallery" : "/salad"}
+            href={viewingPast ? `/gallery?song=${slug}` : "/salad"}
             className="flex shrink-0 items-center gap-3 text-black dark:text-zinc-100"
           >
             <ArrowLeft className="h-5 w-5 shrink-0 sm:h-6 sm:w-6" />
@@ -429,14 +410,6 @@ function ListenPageInner() {
               </span>
             </span>
           </Link>
-
-          <button
-            onClick={toggleMute}
-            disabled={takeWindows.length === 0}
-            className="font-display shrink-0 rounded-[20px] border border-zinc-300 bg-white px-3 py-1.5 text-sm text-black disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-50 sm:px-4 sm:py-2 sm:text-base"
-          >
-            {muted ? "unmute" : "mute others"}
-          </button>
         </div>
 
         {/* Karaoke display: the line playing right now, large and centered,
