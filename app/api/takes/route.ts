@@ -46,6 +46,15 @@ export async function POST(request: Request) {
     .single();
 
   if (insertError) {
+    // 23505 = unique_violation on takes(rendition_id, line_id) — someone else's
+    // take landed on this line first. Without the constraint this would have
+    // silently created an orphaned second row instead of failing cleanly.
+    if (insertError.code === "23505") {
+      return NextResponse.json(
+        { error: "Someone else just recorded this line." },
+        { status: 409 }
+      );
+    }
     return NextResponse.json({ error: insertError.message }, { status: 500 });
   }
 

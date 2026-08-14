@@ -80,6 +80,10 @@ type DbLine = {
   start_ms: number;
   end_ms: number;
   take: Take | null;
+  // Session id of whoever is actively recording this line right now, if any
+  // (see /api/claims) — a soft, advisory "recording in progress" marker, not
+  // the actual collision guard (that's the unique constraint on takes).
+  claimedBySession: string | null;
 };
 
 export default function RecordPage() {
@@ -145,6 +149,15 @@ export default function RecordPage() {
   // True while your own submit/delete is mid-request, so the live-update poll
   // can skip a beat instead of overwriting your not-yet-committed change.
   const writeInFlightRef = useRef(false);
+
+  // Stable per-tab id used to claim/release lines while recording (see
+  // /api/claims), so other tabs can tell your in-progress recording apart
+  // from theirs. Never rendered into HTML, so generating it fresh per tab
+  // (not persisted) causes no SSR/hydration mismatch.
+  const [sessionId] = useState(() => crypto.randomUUID());
+  // Line ids currently claimed by this tab, so finishRecording/cancelFlow can
+  // release exactly those regardless of what selectedIndices has become.
+  const activeClaimLineIdsRef = useRef<string[]>([]);
 
   const songBufferRef = useRef<AudioBuffer | null>(null);
   const recordedBufferRef = useRef<AudioBuffer | null>(null);
@@ -239,7 +252,11 @@ export default function RecordPage() {
               prev.length !== data.lines.length ||
               data.lines.some((l) => {
                 const p = prev.find((x) => x.id === l.id);
-                return !p || (p.take?.id ?? null) !== (l.take?.id ?? null);
+                return (
+                  !p ||
+                  (p.take?.id ?? null) !== (l.take?.id ?? null) ||
+                  (p.claimedBySession ?? null) !== (l.claimedBySession ?? null)
+                );
               });
             return changed ? data.lines : prev;
           });
@@ -265,6 +282,22 @@ export default function RecordPage() {
     }
     return by;
   }, [dbLines]);
+
+  // Open lines someone ELSE is actively recording right now (excludes your
+  // own in-progress claim — you already see that via panelState === "recording").
+  const recordingLines = useMemo(() => {
+    const s = new Set<number>();
+    for (const l of dbLines) {
+      if (
+        !l.take &&
+        l.claimedBySession &&
+        l.claimedBySession !== sessionId
+      ) {
+        s.add(l.idx);
+      }
+    }
+    return s;
+  }, [dbLines, sessionId]);
 
   // Keep the persisted set of your own takes in sync (see myTakeIds).
   useEffect(() => {
@@ -526,6 +559,22 @@ export default function RecordPage() {
 
   // Ends capture (auto-stop or a future manual stop) and slices the exact
   // recorded window out of the continuously-captured mic samples.
+  // Releases whatever lines this tab currently has claimed (see
+  // /api/claims) — best-effort; if it fails the claim just expires on its
+  // own via the TTL, so a failure here doesn't need surfacing.
+  const releaseClaims = useCallback(() => {
+    const lineIds = activeClaimLineIdsRef.current;
+    activeClaimLineIdsRef.current = [];
+    if (lineIds.length === 0) return;
+    fetch("/api/claims", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lineIds, sessionId }),
+    }).catch(() => {
+      /* best-effort */
+    });
+  }, [sessionId]);
+
   const finishRecording = useCallback(() => {
     if (autoStopTimeoutRef.current) {
       clearTimeout(autoStopTimeoutRef.current);
@@ -534,6 +583,7 @@ export default function RecordPage() {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     setCue({ mode: "wait", label: "" });
     stopAllSources(); // stop the backing track the moment the take ends
+    releaseClaims(); // mic capture is ending either way — free the line(s) up
     const capture = micCaptureRef.current;
     const stream = micStreamRef.current;
     const window = recordWindowRef.current;
@@ -564,7 +614,7 @@ export default function RecordPage() {
       setMicError("Could not process recording: " + String(e));
       setPanelState("idle");
     }
-  }, [stopAllSources]);
+  }, [stopAllSources, releaseClaims]);
 
   const beginRecording = useCallback(async () => {
     const indices = [...selectedIndices];
@@ -608,6 +658,29 @@ export default function RecordPage() {
     recordFromSecRef.current = recordFromSec;
     lineStartSecRef.current = lineStartSec;
     stopAllSources();
+
+    // Best-effort: let other tabs know these lines are being sung right now
+    // (see /api/claims). Not awaited — recording starts immediately either
+    // way, this is purely advisory for everyone else's UI.
+    if (renditionId) {
+      const claimLineIds = indices
+        .map((i) => dbLines.find((l) => l.idx === i)?.id)
+        .filter((id): id is string => !!id);
+      activeClaimLineIdsRef.current = claimLineIds;
+      if (claimLineIds.length > 0) {
+        fetch("/api/claims", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            renditionId,
+            lineIds: claimLineIds,
+            sessionId,
+          }),
+        }).catch(() => {
+          /* best-effort */
+        });
+      }
+    }
 
     // Bigger lead so the "get ready" beat is visible before the pre-roll plays.
     const startAt = ctx.currentTime + 0.4;
@@ -665,7 +738,16 @@ export default function RecordPage() {
       }
     };
     rafRef.current = requestAnimationFrame(tick);
-  }, [selectedIndices, lineTimes, stopAllSources, finishRecording, pauseMainPlayback]);
+  }, [
+    selectedIndices,
+    lineTimes,
+    stopAllSources,
+    finishRecording,
+    pauseMainPlayback,
+    dbLines,
+    renditionId,
+    sessionId,
+  ]);
 
   const toggleLine = useCallback((idx: number) => {
     setSelectedIndices((prev) => {
@@ -694,10 +776,11 @@ export default function RecordPage() {
     micStreamRef.current = null;
     recordWindowRef.current = null;
     recordedBufferRef.current = null;
+    releaseClaims();
     setCue({ mode: "wait", label: "" });
     setSelectedIndices(new Set());
     setPanelState("idle");
-  }, [stopAllSources]);
+  }, [stopAllSources, releaseClaims]);
 
   // Skip the pickup pre-roll on playback: start the song at the line, and
   // offset into the voice buffer by the same amount (the buffer starts at
@@ -929,6 +1012,18 @@ export default function RecordPage() {
       finishSubmit();
     } catch (e) {
       setSubmitError("Could not save your take: " + String(e));
+      // Most likely cause of a failure here is someone else's take landing on
+      // the same line first (the unique constraint on takes rejects a second
+      // one) — refresh immediately so the line shows who actually won instead
+      // of waiting out the next live-update poll.
+      fetch(`/api/renditions/${TRACK.id}`)
+        .then((res) => res.json())
+        .then((data: { renditionId: string; lines: DbLine[] }) => {
+          setDbLines(data.lines);
+        })
+        .catch(() => {
+          /* best-effort */
+        });
     } finally {
       setIsSubmitting(false);
       writeInFlightRef.current = false;
@@ -1106,6 +1201,7 @@ export default function RecordPage() {
             onToggleLine={toggleLine}
             onSeekLine={seekToLine}
             deletableLines={deletableLines}
+            recordingLines={recordingLines}
             onDeleteLine={deleteTake}
             deletingLine={deletingLine}
             disabled={panelState !== "idle"}
@@ -1228,6 +1324,7 @@ export default function RecordPage() {
             onToggleLine={toggleLine}
             onSeekLine={seekToLine}
             deletableLines={deletableLines}
+            recordingLines={recordingLines}
             onDeleteLine={deleteTake}
             deletingLine={deletingLine}
             disabled={panelState !== "idle"}

@@ -70,9 +70,24 @@ export async function GET(
     for (const take of takes ?? []) takeByLineId.set(take.line_id, take);
   }
 
+  // Active "recording in progress" claims (see /api/claims) — best-effort:
+  // if the claims table doesn't exist yet (migration not applied), just treat
+  // it as no active claims rather than failing the whole endpoint.
+  const claimBySessionByLineId = new Map<string, string>();
+  if (lineIds.length > 0) {
+    const { data: claims } = await supabaseServer
+      .from("claims")
+      .select("line_id, session_id")
+      .eq("rendition_id", rendition.id)
+      .gt("expires_at", new Date().toISOString())
+      .in("line_id", lineIds);
+    for (const c of claims ?? []) claimBySessionByLineId.set(c.line_id, c.session_id);
+  }
+
   const linesWithTakes = (lines ?? []).map((line) => ({
     ...line,
     take: takeByLineId.get(line.id) ?? null,
+    claimedBySession: claimBySessionByLineId.get(line.id) ?? null,
   }));
 
   return NextResponse.json({ renditionId: rendition.id, lines: linesWithTakes });

@@ -1,6 +1,6 @@
 "use client";
 
-import { CircleCheck, CirclePlus, Trash2 } from "lucide-react";
+import { CircleCheck, CirclePlus, Mic, Trash2 } from "lucide-react";
 import { useEffect, useRef } from "react";
 
 export default function RecordLinesPanel({
@@ -14,6 +14,7 @@ export default function RecordLinesPanel({
   deletableLines,
   onDeleteLine,
   deletingLine,
+  recordingLines,
   disabled,
 }: {
   lines: string[];
@@ -28,6 +29,10 @@ export default function RecordLinesPanel({
   deletableLines?: Set<number>;
   onDeleteLine?: (index: number) => void;
   deletingLine?: number | null;
+  // Open lines someone else is actively recording right now (a soft,
+  // advisory marker — see /api/claims) — shown instead of the "+" button
+  // and not selectable, so two people don't pick the same open line at once.
+  recordingLines?: Set<number>;
   disabled: boolean;
 }) {
   const activeRef = useRef<HTMLDivElement>(null);
@@ -51,6 +56,7 @@ export default function RecordLinesPanel({
           const taken = takenLines.has(i);
           const selected = selectedIndices.has(i);
           const deletable = taken && !!onDeleteLine && !!deletableLines?.has(i);
+          const recording = !taken && !!recordingLines?.has(i);
           return (
             <div
               key={i}
@@ -89,6 +95,11 @@ export default function RecordLinesPanel({
                     {takenBy[i] ?? "taken"}
                   </span>
                 )
+              ) : recording ? (
+                <span className="font-display flex shrink-0 items-center gap-1 whitespace-nowrap text-[11px] text-red-300">
+                  <Mic size={13} className="animate-pulse" />
+                  recording…
+                </span>
               ) : selected ? (
                 <button
                   disabled={disabled}
