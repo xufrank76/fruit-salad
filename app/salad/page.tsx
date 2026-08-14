@@ -1,8 +1,6 @@
-import Image from "next/image";
-import Link from "next/link";
 import AlbumCarousel from "./AlbumCarousel";
 import { fetchAlbumArtwork } from "@/lib/itunes";
-import { OTHER_TRACKS, SONGS } from "@/lib/track";
+import { DEFAULT_SONG, OTHER_TRACKS, SONGS } from "@/lib/track";
 import { supabaseServer } from "@/lib/supabase-server";
 import { CANVAS_HEIGHT, CANVAS_WIDTH, cover } from "../coverUnit";
 import FruitField from "../FruitField";
@@ -11,31 +9,62 @@ import FruitField from "../FruitField";
 // reflects real progress. (Album art fetches keep their own 1-day cache.)
 export const dynamic = "force-dynamic";
 
-// Real completion = distinct lines with a take / total lines, for the song's
-// public rendition. Read-only (never creates a rendition); 0 if none/error.
-async function getCompletion(songId: string): Promise<number> {
+type Progress = { percent: number; voices: number };
+const NO_PROGRESS: Progress = { percent: 0, voices: 0 };
+
+// Real completion = distinct lines with a take / total lines, plus how many
+// distinct singers contributed those takes, for the song's current public
+// rendition. Read-only (never creates a rendition); zeroed on any error.
+async function getProgress(songId: string): Promise<Progress> {
   try {
     const { data: lines } = await supabaseServer
       .from("lines")
       .select("id")
       .eq("song_id", songId);
     const total = lines?.length ?? 0;
-    if (total === 0) return 0;
+    if (total === 0) return NO_PROGRESS;
 
-    const { data: rendition } = await supabaseServer
+    // The current, still-open rendition — same lookup as GET
+    // /api/renditions/[songId]. A song can have both a sealed rendition and
+    // a fresh one going at once (see auto-restart), so this must exclude
+    // completed ones instead of assuming at most one public row exists.
+    const { data: renditions } = await supabaseServer
       .from("renditions")
       .select("id")
       .eq("song_id", songId)
       .eq("mode", "public")
-      .maybeSingle();
-    if (!rendition) return 0;
+      .neq("status", "completed")
+      .order("created_at", { ascending: false })
+      .limit(1);
+    const rendition = renditions?.[0];
+    if (!rendition) return NO_PROGRESS;
 
     const { data: takes } = await supabaseServer
       .from("takes")
-      .select("line_id")
+      .select("line_id, singer_name")
       .eq("rendition_id", rendition.id);
     const takenLineIds = new Set((takes ?? []).map((t) => t.line_id));
-    return Math.round((takenLineIds.size / total) * 100);
+    const voices = new Set((takes ?? []).map((t) => t.singer_name || "Anonymous"));
+    return {
+      percent: Math.round((takenLineIds.size / total) * 100),
+      voices: voices.size,
+    };
+  } catch {
+    return NO_PROGRESS;
+  }
+}
+
+// How many times this song has been fully sung already (sealed renditions —
+// see POST /api/takes) — drives the "past salads" link on its card. 0 on any
+// error so the card just omits the link instead of crashing.
+async function getPastSaladsCount(songId: string): Promise<number> {
+  try {
+    const { count } = await supabaseServer
+      .from("renditions")
+      .select("id", { count: "exact", head: true })
+      .eq("song_id", songId)
+      .eq("status", "completed");
+    return count ?? 0;
   } catch {
     return 0;
   }
@@ -44,22 +73,39 @@ async function getCompletion(songId: string): Promise<number> {
 export default async function SaladPage() {
   // Licensed-for-display artwork via Apple's iTunes Search API (lib/itunes.ts)
   // — falls back to the generated halftone pattern below if the lookup fails.
-  const [songCompletions, songCoverUrls, otherCoverUrls] = await Promise.all([
-    Promise.all(SONGS.map((s) => getCompletion(s.id))),
-    Promise.all(SONGS.map((s) => fetchAlbumArtwork(s.artist, s.title))),
-    Promise.all(OTHER_TRACKS.map((t) => fetchAlbumArtwork(t.artist, t.title))),
-  ]);
+  const [songProgress, pastSaladsCounts, songCoverUrls, otherCoverUrls] =
+    await Promise.all([
+      Promise.all(SONGS.map((s) => getProgress(s.id))),
+      Promise.all(SONGS.map((s) => getPastSaladsCount(s.id))),
+      Promise.all(SONGS.map((s) => fetchAlbumArtwork(s.artist, s.title))),
+      Promise.all(OTHER_TRACKS.map((t) => fetchAlbumArtwork(t.artist, t.title))),
+    ]);
 
-  const songTracks = SONGS.map((s, i) => ({
+  const songTracksAll = SONGS.map((s, i) => ({
     title: s.title,
     artist: s.artist,
     coverUrl: songCoverUrls[i],
-    completePercent: songCompletions[i], // real: recorded lines / total lines
+    completePercent: songProgress[i].percent, // real: recorded lines / total lines
+    voices: songProgress[i].voices,
     singable: true,
     slug: s.slug,
+    pastSalads: pastSaladsCounts[i],
   }));
 
-  // The singable SONGS sit in the middle of the shelf (not at an end) so
+  // Keep the default song centered in the shelf (not wherever it happens to
+  // sit in SONGS) — same spot the original single-TRACK layout always gave
+  // it, with the rest of the singable songs split evenly around it.
+  const defaultIdx = songTracksAll.findIndex((t) => t.slug === DEFAULT_SONG.slug);
+  const defaultTrack = songTracksAll[defaultIdx];
+  const restSongTracks = songTracksAll.filter((_, i) => i !== defaultIdx);
+  const songSplitAt = Math.ceil(restSongTracks.length / 2);
+  const songTracks = [
+    ...restSongTracks.slice(0, songSplitAt),
+    defaultTrack,
+    ...restSongTracks.slice(songSplitAt),
+  ];
+
+  // The singable songs sit in the middle of the shelf (not at an end) so
   // there's something to scroll to on both sides.
   const otherTracks = OTHER_TRACKS.map((t, i) => ({
     title: t.title,
@@ -68,13 +114,13 @@ export default async function SaladPage() {
     completePercent: 0, // no DB rows -> genuinely nothing recorded yet
     singable: false,
   }));
-  const splitAt = Math.ceil(otherTracks.length / 2);
+  const otherSplitAt = Math.ceil(otherTracks.length / 2);
   const carouselTracks = [
-    ...otherTracks.slice(0, splitAt),
+    ...otherTracks.slice(0, otherSplitAt),
     ...songTracks,
-    ...otherTracks.slice(splitAt),
+    ...otherTracks.slice(otherSplitAt),
   ];
-  const trackIndex = splitAt;
+  const trackIndex = otherSplitAt + songSplitAt;
 
   return (
     <div className="relative h-dvh w-full overflow-hidden bg-white dark:bg-black">
@@ -86,43 +132,6 @@ export default async function SaladPage() {
             background texture instead of competing with this page's content. */}
         <div className="opacity-10">
           <FruitField />
-        </div>
-
-        <div
-          className="font-display absolute flex items-end"
-          style={{ left: cover(11), top: cover(20), gap: cover(64) }}
-        >
-          {/* "sing" -> this song-picker flow, "salads" -> the gallery of
-              finished collaborative songs. Active tab is bold/black, inactive
-              is muted — hardcoded per-page since each tab is its own route. */}
-          <Link
-            href="/salad"
-            prefetch={false}
-            className="font-medium text-black dark:text-zinc-100"
-            style={{ fontSize: cover(24) }}
-          >
-            sing
-          </Link>
-          <span
-            className="relative shrink-0"
-            style={{ width: cover(27), height: cover(27) }}
-          >
-            <Image
-              src="/fruit/orange-slice.png"
-              alt=""
-              fill
-              draggable={false}
-              className="select-none object-contain"
-            />
-          </span>
-          <Link
-            href="/gallery"
-            prefetch={false}
-            className="text-zinc-400 dark:text-zinc-600"
-            style={{ fontSize: cover(24) }}
-          >
-            salads
-          </Link>
         </div>
 
         {/* Card + progress + button row share one flex column so later blocks

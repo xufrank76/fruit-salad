@@ -10,12 +10,19 @@ export type CarouselTrack = {
   artist: string;
   coverUrl: string | null;
   completePercent: number;
+  // Distinct singers who've contributed a take to the current rendition —
+  // shown alongside completePercent. Not tied to singable, but only ever
+  // > 0 for songs that are (no DB rows to count otherwise).
+  voices?: number;
   // Only SONGS entries have audio/lyrics wired up (see lib/track.ts) —
   // everything else can be browsed here but can't actually be recorded yet.
   singable: boolean;
   // Set only when singable — which song's /record and /listen routes this
   // card links to.
   slug?: string;
+  // How many times this song has already been fully sung (sealed
+  // renditions) — shows a "past salads" link beneath the buttons when > 0.
+  pastSalads?: number;
 };
 
 const CARD_SIZE = 274;
@@ -86,6 +93,16 @@ export default function AlbumCarousel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Tapping a neighboring (non-centered) card brings it to center, same as
+  // scrolling there by hand.
+  const scrollToIndex = useCallback((i: number) => {
+    cardRefs.current[i]?.scrollIntoView({
+      inline: "center",
+      block: "nearest",
+      behavior: "smooth",
+    });
+  }, []);
+
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -125,7 +142,8 @@ export default function AlbumCarousel({
             ref={(el) => {
               cardRefs.current[i] = el;
             }}
-            className="relative flex shrink-0 snap-center items-end overflow-hidden rounded-[20px] bg-[#7a2020] shadow-xl"
+            onClick={() => scrollToIndex(i)}
+            className="relative flex shrink-0 cursor-pointer snap-center items-end overflow-hidden rounded-[20px] bg-[#7a2020] shadow-xl"
             style={{
               width: cover(CARD_SIZE),
               height: cover(CARD_SIZE),
@@ -184,6 +202,8 @@ export default function AlbumCarousel({
           style={{ fontSize: cover(16) }}
         >
           {centeredTrack.completePercent}% complete
+          {!!centeredTrack.voices &&
+            `, ${centeredTrack.voices} voice${centeredTrack.voices === 1 ? "" : "s"}`}
         </p>
         <div
           className="mt-1 w-full overflow-hidden rounded-[20px] bg-zinc-300 dark:bg-zinc-700"
@@ -285,6 +305,19 @@ export default function AlbumCarousel({
           </span>
         )}
       </div>
+
+      {centeredTrack.singable && centeredTrack.slug && !!centeredTrack.pastSalads && (
+        <Link
+          href={`/gallery?song=${centeredTrack.slug}`}
+          prefetch={false}
+          className="font-display text-center text-zinc-400 underline-offset-2 hover:text-black hover:underline dark:text-zinc-500 dark:hover:text-zinc-100"
+          style={{ fontSize: cover(14) }}
+        >
+          {centeredTrack.pastSalads === 1
+            ? "1 past salad"
+            : `${centeredTrack.pastSalads} past salads`}
+        </Link>
+      )}
     </div>
   );
 }

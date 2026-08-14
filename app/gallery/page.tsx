@@ -1,7 +1,8 @@
+import { ArrowLeft } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
 import { fetchAlbumArtwork } from "@/lib/itunes";
-import { SONGS, type Song } from "@/lib/track";
+import { getSongBySlug, SONGS, type Song } from "@/lib/track";
 import { supabaseServer } from "@/lib/supabase-server";
 import { CANVAS_HEIGHT, CANVAS_WIDTH } from "../coverUnit";
 import FruitField from "../FruitField";
@@ -13,24 +14,41 @@ export const dynamic = "force-dynamic";
 type CompletedRendition = {
   id: string;
   completedAt: string;
+  contributorCount: number;
 };
 
-// Every sealed (fully-sung) rendition of a song, newest first — a rendition
-// gets sealed the moment its last open line is recorded (see POST
-// /api/takes). Read-only, never creates anything; empty on any error
-// (including completed_at not existing yet, pre-migration) so the page just
-// shows its empty state instead of crashing.
+// Every sealed (fully-sung) rendition of a song, newest first, with how many
+// distinct singers filled it in — a rendition gets sealed the moment its
+// last open line is recorded (see POST /api/takes). Read-only, never creates
+// anything; empty on any error (including completed_at not existing yet,
+// pre-migration) so the page just shows its empty state instead of crashing.
 async function getCompletedRenditions(songId: string): Promise<CompletedRendition[]> {
   try {
-    const { data } = await supabaseServer
+    const { data: renditions } = await supabaseServer
       .from("renditions")
       .select("id, completed_at")
       .eq("song_id", songId)
       .eq("status", "completed")
       .order("completed_at", { ascending: false });
-    return (data ?? [])
-      .filter((r) => r.completed_at)
-      .map((r) => ({ id: r.id, completedAt: r.completed_at as string }));
+    const sealed = (renditions ?? []).filter((r) => r.completed_at);
+    if (sealed.length === 0) return [];
+
+    const { data: takes } = await supabaseServer
+      .from("takes")
+      .select("rendition_id, singer_name")
+      .in("rendition_id", sealed.map((r) => r.id));
+    const singersByRendition = new Map<string, Set<string>>();
+    for (const t of takes ?? []) {
+      const set = singersByRendition.get(t.rendition_id) ?? new Set<string>();
+      set.add(t.singer_name || "Anonymous");
+      singersByRendition.set(t.rendition_id, set);
+    }
+
+    return sealed.map((r) => ({
+      id: r.id,
+      completedAt: r.completed_at as string,
+      contributorCount: singersByRendition.get(r.id)?.size ?? 0,
+    }));
   } catch {
     return [];
   }
@@ -38,11 +56,21 @@ async function getCompletedRenditions(songId: string): Promise<CompletedRenditio
 
 type GalleryEntry = CompletedRendition & { song: Song; coverUrl: string | null };
 
-export default async function GalleryPage() {
-  // Every SONGS entry can have its own completed renditions, so gather each
-  // song's list + cover art, then merge into one newest-first feed.
+export default async function GalleryPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ song?: string }>;
+}) {
+  // ?song=<slug> (from the carousel's per-song "N past salads" link) narrows
+  // this to just that song instead of the whole library's feed.
+  const { song: songSlug } = await searchParams;
+  const filteredSong = songSlug ? getSongBySlug(songSlug) : undefined;
+  const songs = filteredSong ? [filteredSong] : SONGS;
+
+  // Every song in scope can have its own completed renditions, so gather
+  // each one's list + cover art, then merge into one newest-first feed.
   const perSong = await Promise.all(
-    SONGS.map(async (song) => {
+    songs.map(async (song) => {
       const [renditions, coverUrl] = await Promise.all([
         getCompletedRenditions(song.id),
         fetchAlbumArtwork(song.artist, song.title),
@@ -72,28 +100,13 @@ export default async function GalleryPage() {
       </div>
 
       <div className="relative z-10 flex h-full w-full flex-col">
-        <div className="font-display flex items-end gap-10 px-4 pt-5 sm:gap-16 sm:px-8 sm:pt-6">
-          <Link
-            href="/salad"
-            className="text-xl text-zinc-400 dark:text-zinc-600 sm:text-2xl"
-          >
-            sing
+        <div className="flex items-center gap-3 px-4 pt-5 sm:px-8 sm:pt-6">
+          <Link href="/salad" className="shrink-0 text-black dark:text-zinc-100">
+            <ArrowLeft className="h-5 w-5 sm:h-6 sm:w-6" />
           </Link>
-          <span className="relative h-6 w-6 shrink-0 sm:h-7 sm:w-7">
-            <Image
-              src="/fruit/orange-slice.png"
-              alt=""
-              fill
-              draggable={false}
-              className="select-none object-contain"
-            />
-          </span>
-          <Link
-            href="/gallery"
-            className="text-xl font-medium text-black dark:text-zinc-100 sm:text-2xl"
-          >
-            salads
-          </Link>
+          <p className="font-display text-xl font-medium text-black dark:text-zinc-100 sm:text-2xl">
+            {filteredSong ? `past salads of ${filteredSong.title}` : "salads"}
+          </p>
         </div>
 
         {completed.length === 0 ? (
@@ -106,7 +119,7 @@ export default async function GalleryPage() {
               here.
             </p>
             <Link
-              href="/salad"
+              href={filteredSong ? `/record/${filteredSong.slug}` : "/salad"}
               className="font-display mt-2 rounded-[20px] border border-[rgba(253,137,2,0.2)] bg-[#ffefdc] px-6 py-3 text-base text-black"
             >
               go sing something
@@ -114,12 +127,12 @@ export default async function GalleryPage() {
           </div>
         ) : (
           <div className="min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-8">
-            <div className="mx-auto grid max-w-4xl grid-cols-2 gap-4 sm:grid-cols-3 sm:gap-6 md:grid-cols-4">
+            <div className="flex max-w-4xl flex-wrap gap-4 sm:gap-6">
               {completed.map((r) => (
                 <Link
                   key={r.id}
                   href={`/listen/${r.song.slug}?rendition=${r.id}`}
-                  className="group flex flex-col gap-2"
+                  className="group flex w-36 flex-col gap-2 sm:w-44"
                 >
                   <div className="relative aspect-square w-full overflow-hidden rounded-[20px] bg-[#7a2020] shadow-lg transition-transform group-hover:scale-[1.02]">
                     {r.coverUrl ? (
@@ -152,6 +165,11 @@ export default async function GalleryPage() {
                         day: "numeric",
                         year: "numeric",
                       })}
+                    </p>
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                      {r.contributorCount === 1
+                        ? "1 voice"
+                        : `${r.contributorCount} voices`}
                     </p>
                   </div>
                 </Link>
