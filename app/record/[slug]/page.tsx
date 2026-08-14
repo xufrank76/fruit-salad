@@ -253,7 +253,12 @@ export default function RecordPage() {
         .then((res) => res.json())
         .then((data: { renditionId: string; lines: DbLine[] }) => {
           if (cancelled) return;
-          setRenditionId((r) => r ?? data.renditionId);
+          // Not `r ?? data.renditionId`: once a rendition is fully sung, the
+          // backend seals it and silently starts a fresh one on the next GET
+          // (see /api/renditions/[songId]). Always adopting the latest id is
+          // what makes an open tab pick up that reset instead of staying
+          // pinned to the now-sealed rendition and submitting takes into it.
+          setRenditionId(data.renditionId);
           setDbLines((prev) => {
             const changed =
               prev.length !== data.lines.length ||
@@ -759,12 +764,30 @@ export default function RecordPage() {
     song,
   ]);
 
+  // Selection must stay one contiguous run of lines — the recording window
+  // spans from the first selected line's start to the last one's end (see
+  // beginRecording), so a gap would capture (and discard) audio for
+  // whatever sits between the pieces instead of the lines actually meant.
   const toggleLine = useCallback((idx: number) => {
     setSelectedIndices((prev) => {
-      const next = new Set(prev);
-      if (next.has(idx)) next.delete(idx);
-      else next.add(idx);
-      return next;
+      if (prev.has(idx)) {
+        // Only shrinkable from an end — removing one from the middle would
+        // split the run into two non-consecutive pieces.
+        const sorted = [...prev].sort((a, b) => a - b);
+        if (idx !== sorted[0] && idx !== sorted[sorted.length - 1]) return prev;
+        const next = new Set(prev);
+        next.delete(idx);
+        return next;
+      }
+      if (prev.size === 0) return new Set([idx]);
+      const min = Math.min(...prev);
+      const max = Math.max(...prev);
+      if (idx === min - 1 || idx === max + 1) {
+        return new Set([...prev, idx]);
+      }
+      // Not adjacent to the current run — start fresh there instead of
+      // silently ignoring the click.
+      return new Set([idx]);
     });
     setMicError(null);
   }, []);
