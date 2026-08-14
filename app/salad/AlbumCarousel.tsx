@@ -250,20 +250,35 @@ export default function AlbumCarousel({
           </span>
         )}
 
-        {/* No read-path against assembled takes yet (see README schema) —
-            disabled everywhere until that's wired up. */}
-        <span
-          aria-disabled="true"
-          className="font-display flex cursor-not-allowed items-center justify-center border border-[#ffefdc] bg-white text-black opacity-40 dark:bg-zinc-900 dark:text-zinc-50"
-          style={{
-            width: cover(182),
-            height: cover(57),
-            borderRadius: cover(20),
-            fontSize: cover(24),
-          }}
-        >
-          hear the salad
-        </span>
+        {/* Only TRACK has lines/takes to assemble — same singable-gated
+            pattern as "add a fruit" above. */}
+        {centeredTrack.singable ? (
+          <Link
+            href="/listen"
+            className="font-display flex items-center justify-center border border-[#ffefdc] bg-white text-black dark:bg-zinc-900 dark:text-zinc-50"
+            style={{
+              width: cover(182),
+              height: cover(57),
+              borderRadius: cover(20),
+              fontSize: cover(24),
+            }}
+          >
+            hear the salad
+          </Link>
+        ) : (
+          <span
+            aria-disabled="true"
+            className="font-display flex cursor-not-allowed items-center justify-center border border-[#ffefdc] bg-white text-black opacity-40 dark:bg-zinc-900 dark:text-zinc-50"
+            style={{
+              width: cover(182),
+              height: cover(57),
+              borderRadius: cover(20),
+              fontSize: cover(24),
+            }}
+          >
+            hear the salad
+          </span>
+        )}
       </div>
     </div>
   );
