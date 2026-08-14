@@ -996,7 +996,14 @@ export default function RecordPage() {
         });
         if (!res.ok) {
           const body = await res.json().catch(() => null);
-          throw new Error(body?.error ?? `Upload failed (${res.status})`);
+          if (res.status === 409) {
+            throw new Error(
+              body?.error ?? "Someone else just recorded this line — try another."
+            );
+          }
+          throw new Error(
+            body?.error ?? `Couldn't save your take (server error ${res.status}). Try again.`
+          );
         }
         const { take } = (await res.json()) as { take: Take };
         setDbLines((prev) =>
@@ -1011,7 +1018,11 @@ export default function RecordPage() {
       }
       finishSubmit();
     } catch (e) {
-      setSubmitError("Could not save your take: " + String(e));
+      // Every thrown message above already reads as a complete sentence, so
+      // show it as-is rather than wrapping it (which used to double up with
+      // Error's own "Error: " prefix from String(e), e.g. "Could not save
+      // your take: Error: ...").
+      setSubmitError(e instanceof Error ? e.message : String(e));
       // Most likely cause of a failure here is someone else's take landing on
       // the same line first (the unique constraint on takes rejects a second
       // one) — refresh immediately so the line shows who actually won instead
@@ -1072,7 +1083,8 @@ export default function RecordPage() {
         // The line's fruit disappears on its own — bgFruits is derived from
         // the taken lines, and this line just became untaken.
       } catch (e) {
-        setSubmitError("Could not delete your take: " + String(e));
+        const message = e instanceof Error ? e.message : String(e);
+        setSubmitError(`Could not delete your take: ${message}`);
       } finally {
         setDeletingLine(null);
         writeInFlightRef.current = false;

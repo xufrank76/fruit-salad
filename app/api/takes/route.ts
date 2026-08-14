@@ -51,7 +51,7 @@ export async function POST(request: Request) {
     // silently created an orphaned second row instead of failing cleanly.
     if (insertError.code === "23505") {
       return NextResponse.json(
-        { error: "Someone else just recorded this line." },
+        { error: "Someone else just recorded this line — try another." },
         { status: 409 }
       );
     }
