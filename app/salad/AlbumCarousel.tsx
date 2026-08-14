@@ -10,9 +10,12 @@ export type CarouselTrack = {
   artist: string;
   coverUrl: string | null;
   completePercent: number;
-  // Only TRACK has audio/lyrics wired up (see lib/track.ts) — everything
-  // else can be browsed here but can't actually be recorded yet.
+  // Only SONGS entries have audio/lyrics wired up (see lib/track.ts) —
+  // everything else can be browsed here but can't actually be recorded yet.
   singable: boolean;
+  // Set only when singable — which song's /record and /listen routes this
+  // card links to.
+  slug?: string;
 };
 
 const CARD_SIZE = 274;
@@ -194,9 +197,10 @@ export default function AlbumCarousel({
       </div>
 
       <div className="flex items-center justify-center" style={{ gap: cover(20) }}>
-        {centeredTrack.singable ? (
+        {centeredTrack.singable && centeredTrack.slug ? (
           <Link
-            href="/record"
+            href={`/record/${centeredTrack.slug}`}
+            prefetch={false}
             className="font-display flex items-center justify-center border border-[rgba(253,137,2,0.2)] bg-[#ffefdc] text-black"
             style={{
               width: cover(182),
@@ -221,8 +225,8 @@ export default function AlbumCarousel({
             add a fruit
           </Link>
         ) : (
-          // Not TRACK — no audio/lyrics wired up for this song yet, so
-          // there's nothing to record. Same shape, dimmed and inert.
+          // No audio/lyrics wired up for this song yet, so there's nothing
+          // to record. Same shape, dimmed and inert.
           <span
             aria-disabled="true"
             className="font-display flex cursor-not-allowed items-center justify-center border border-[rgba(253,137,2,0.2)] bg-[#ffefdc] text-black opacity-40"
@@ -250,11 +254,12 @@ export default function AlbumCarousel({
           </span>
         )}
 
-        {/* Only TRACK has lines/takes to assemble — same singable-gated
-            pattern as "add a fruit" above. */}
-        {centeredTrack.singable ? (
+        {/* Only SONGS entries have lines/takes to assemble — same
+            singable-gated pattern as "add a fruit" above. */}
+        {centeredTrack.singable && centeredTrack.slug ? (
           <Link
-            href="/listen"
+            href={`/listen/${centeredTrack.slug}`}
+            prefetch={false}
             className="font-display flex items-center justify-center border border-[#ffefdc] bg-white text-black dark:bg-zinc-900 dark:text-zinc-50"
             style={{
               width: cover(182),

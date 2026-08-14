@@ -14,6 +14,42 @@ const TRACKS = [
     title: "Beauty and a Beat",
     durationSec: 228,
   },
+  {
+    out: "public/youbelongwithme.txt",
+    artist: "Taylor Swift",
+    title: "You Belong With Me",
+    durationSec: 228,
+  },
+  {
+    out: "public/riskitall.txt",
+    artist: "Bruno Mars",
+    title: "Risk It All",
+    durationSec: 205,
+  },
+  {
+    out: "public/letitgo.txt",
+    artist: "Idina Menzel",
+    title: "Let It Go",
+    durationSec: 224,
+  },
+  {
+    out: "public/thankunext.txt",
+    artist: "Ariana Grande",
+    title: "thank u, next",
+    durationSec: 207,
+  },
+  {
+    out: "public/clarity.txt",
+    artist: "Zedd",
+    title: "Clarity",
+    durationSec: 271,
+  },
+  {
+    out: "public/birdsofafeather.txt",
+    artist: "Billie Eilish",
+    title: "Birds of a Feather",
+    durationSec: 210,
+  },
 ];
 
 for (const t of TRACKS) {
@@ -34,9 +70,14 @@ for (const t of TRACKS) {
       console.error(`✗ ${t.title}: no synced lyrics in LRCLIB`);
       continue;
     }
-    writeFileSync(t.out, data.syncedLyrics.trimEnd() + "\n");
-    const count = data.syncedLyrics.trim().split("\n").length;
-    console.log(`✓ ${t.title}: ${count} timed lines → ${t.out}`);
+    // LRCLIB marks instrumental breaks as a bare timestamp with no words
+    // (e.g. "[01:07.56] ") — drop those, or they'd show up as blank,
+    // singable rows in the app.
+    const lines = data.syncedLyrics
+      .split(/\r?\n/)
+      .filter((line) => /^\[\d+:\d+(?:\.\d+)?\]\s*\S/.test(line));
+    writeFileSync(t.out, lines.join("\n") + "\n");
+    console.log(`✓ ${t.title}: ${lines.length} timed lines → ${t.out}`);
   } catch (e) {
     console.error(`✗ ${t.title}: ${e.message}`);
   }

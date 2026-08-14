@@ -1,40 +1,85 @@
 import Image from "next/image";
 import Link from "next/link";
-import { CANVAS_HEIGHT, CANVAS_WIDTH, cover } from "../coverUnit";
+import { fetchAlbumArtwork } from "@/lib/itunes";
+import { SONGS, type Song } from "@/lib/track";
+import { supabaseServer } from "@/lib/supabase-server";
+import { CANVAS_HEIGHT, CANVAS_WIDTH } from "../coverUnit";
 import FruitField from "../FruitField";
 
-// No renditions/gallery data exists yet (see README's `renditions` table —
-// nothing writes to it until a song's lines are fully sung and assembled).
-// This is a placeholder shell for that view, not real data.
+// Live, not a cached snapshot — recompute per request so a rendition that
+// just sealed shows up here right away.
+export const dynamic = "force-dynamic";
 
-export default function GalleryPage() {
+type CompletedRendition = {
+  id: string;
+  completedAt: string;
+};
+
+// Every sealed (fully-sung) rendition of a song, newest first — a rendition
+// gets sealed the moment its last open line is recorded (see POST
+// /api/takes). Read-only, never creates anything; empty on any error
+// (including completed_at not existing yet, pre-migration) so the page just
+// shows its empty state instead of crashing.
+async function getCompletedRenditions(songId: string): Promise<CompletedRendition[]> {
+  try {
+    const { data } = await supabaseServer
+      .from("renditions")
+      .select("id, completed_at")
+      .eq("song_id", songId)
+      .eq("status", "completed")
+      .order("completed_at", { ascending: false });
+    return (data ?? [])
+      .filter((r) => r.completed_at)
+      .map((r) => ({ id: r.id, completedAt: r.completed_at as string }));
+  } catch {
+    return [];
+  }
+}
+
+type GalleryEntry = CompletedRendition & { song: Song; coverUrl: string | null };
+
+export default async function GalleryPage() {
+  // Every SONGS entry can have its own completed renditions, so gather each
+  // song's list + cover art, then merge into one newest-first feed.
+  const perSong = await Promise.all(
+    SONGS.map(async (song) => {
+      const [renditions, coverUrl] = await Promise.all([
+        getCompletedRenditions(song.id),
+        fetchAlbumArtwork(song.artist, song.title),
+      ]);
+      return renditions.map((r): GalleryEntry => ({ ...r, song, coverUrl }));
+    })
+  );
+  const completed = perSong
+    .flat()
+    .sort((a, b) => (a.completedAt < b.completedAt ? 1 : -1));
+
   return (
     <div className="relative h-dvh w-full overflow-hidden bg-white dark:bg-black">
-      <div
-        className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
-        style={{ width: CANVAS_WIDTH, height: CANVAS_HEIGHT }}
-      >
-        {/* Same decorative field as the homepage, dimmed so it stays
-            background texture instead of competing with this page's content. */}
-        <div className="opacity-10">
-          <FruitField />
-        </div>
-
+      {/* Decorative background only, kept on the app's fixed 1280x832 canvas
+          (matching FruitField's own layout); the interactive content below
+          uses plain responsive Tailwind so an arbitrarily long, scrollable
+          grid works correctly on any screen size, portrait phones included. */}
+      <div className="pointer-events-none absolute inset-0">
         <div
-          className="font-display absolute flex items-end"
-          style={{ left: cover(11), top: cover(20), gap: cover(64) }}
+          className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
+          style={{ width: CANVAS_WIDTH, height: CANVAS_HEIGHT }}
         >
+          <div className="opacity-10">
+            <FruitField />
+          </div>
+        </div>
+      </div>
+
+      <div className="relative z-10 flex h-full w-full flex-col">
+        <div className="font-display flex items-end gap-10 px-4 pt-5 sm:gap-16 sm:px-8 sm:pt-6">
           <Link
             href="/salad"
-            className="text-zinc-400 dark:text-zinc-600"
-            style={{ fontSize: cover(24) }}
+            className="text-xl text-zinc-400 dark:text-zinc-600 sm:text-2xl"
           >
             sing
           </Link>
-          <span
-            className="relative shrink-0"
-            style={{ width: cover(27), height: cover(27) }}
-          >
+          <span className="relative h-6 w-6 shrink-0 sm:h-7 sm:w-7">
             <Image
               src="/fruit/orange-slice.png"
               alt=""
@@ -45,43 +90,75 @@ export default function GalleryPage() {
           </span>
           <Link
             href="/gallery"
-            className="font-medium text-black dark:text-zinc-100"
-            style={{ fontSize: cover(24) }}
+            className="text-xl font-medium text-black dark:text-zinc-100 sm:text-2xl"
           >
             salads
           </Link>
         </div>
 
-        <div
-          className="absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 flex-col items-center text-center"
-          style={{ gap: cover(8) }}
-        >
-          <p
-            className="font-display font-medium text-black dark:text-zinc-50"
-            style={{ fontSize: cover(24) }}
-          >
-            no finished salads yet
-          </p>
-          <p
-            className="font-display max-w-xs text-zinc-500 dark:text-zinc-400"
-            style={{ fontSize: cover(16) }}
-          >
-            once every line of a song is sung by someone, it&apos;ll show up here.
-          </p>
-          <Link
-            href="/salad"
-            className="font-display mt-2 rounded-[20px] border border-[rgba(253,137,2,0.2)] bg-[#ffefdc] text-black"
-            style={{
-              paddingLeft: cover(24),
-              paddingRight: cover(24),
-              paddingTop: cover(12),
-              paddingBottom: cover(12),
-              fontSize: cover(16),
-            }}
-          >
-            go sing something
-          </Link>
-        </div>
+        {completed.length === 0 ? (
+          <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
+            <p className="font-display text-2xl font-medium text-black dark:text-zinc-50">
+              no finished salads yet
+            </p>
+            <p className="font-display max-w-xs text-base text-zinc-500 dark:text-zinc-400">
+              once every line of a song is sung by someone, it&apos;ll show up
+              here.
+            </p>
+            <Link
+              href="/salad"
+              className="font-display mt-2 rounded-[20px] border border-[rgba(253,137,2,0.2)] bg-[#ffefdc] px-6 py-3 text-base text-black"
+            >
+              go sing something
+            </Link>
+          </div>
+        ) : (
+          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-8">
+            <div className="mx-auto grid max-w-4xl grid-cols-2 gap-4 sm:grid-cols-3 sm:gap-6 md:grid-cols-4">
+              {completed.map((r) => (
+                <Link
+                  key={r.id}
+                  href={`/listen/${r.song.slug}?rendition=${r.id}`}
+                  className="group flex flex-col gap-2"
+                >
+                  <div className="relative aspect-square w-full overflow-hidden rounded-[20px] bg-[#7a2020] shadow-lg transition-transform group-hover:scale-[1.02]">
+                    {r.coverUrl ? (
+                      <Image
+                        src={r.coverUrl}
+                        alt=""
+                        fill
+                        className="object-cover"
+                        sizes="25vw"
+                      />
+                    ) : (
+                      <div
+                        className="absolute inset-0"
+                        style={{
+                          backgroundImage:
+                            "radial-gradient(circle, rgba(255,239,220,0.5) 1.6px, transparent 1.6px)",
+                          backgroundSize: "10px 10px",
+                        }}
+                      />
+                    )}
+                  </div>
+                  <div className="font-display px-1">
+                    <p className="truncate text-sm font-medium text-black dark:text-zinc-50">
+                      {r.song.title}
+                    </p>
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                      completed{" "}
+                      {new Date(r.completedAt).toLocaleDateString(undefined, {
+                        month: "short",
+                        day: "numeric",
+                        year: "numeric",
+                      })}
+                    </p>
+                  </div>
+                </Link>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       <p className="font-display pointer-events-none absolute bottom-6 right-6 text-5xl font-medium text-black sm:text-6xl md:text-7xl lg:text-8xl dark:text-zinc-50">

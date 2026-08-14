@@ -58,6 +58,42 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: insertError.message }, { status: 500 });
   }
 
+  // If this take just filled the last open line, seal the rendition (see
+  // README: "when all lines are filled, the rendition is sealed, published
+  // to a gallery, and a new one starts") — the next visit to
+  // /api/renditions/[songId] then spins up a fresh rendition automatically
+  // instead of reusing this finished one. Best-effort: a failure here
+  // shouldn't fail the take that was just successfully saved.
+  try {
+    const { data: rendition } = await supabaseServer
+      .from("renditions")
+      .select("song_id")
+      .eq("id", renditionId)
+      .maybeSingle();
+
+    if (rendition) {
+      const { count: totalLines } = await supabaseServer
+        .from("lines")
+        .select("id", { count: "exact", head: true })
+        .eq("song_id", rendition.song_id);
+
+      const { data: takenRows } = await supabaseServer
+        .from("takes")
+        .select("line_id")
+        .eq("rendition_id", renditionId);
+      const takenCount = new Set((takenRows ?? []).map((t) => t.line_id)).size;
+
+      if (totalLines != null && totalLines > 0 && takenCount >= totalLines) {
+        await supabaseServer
+          .from("renditions")
+          .update({ status: "completed", completed_at: new Date().toISOString() })
+          .eq("id", renditionId);
+      }
+    }
+  } catch {
+    /* best-effort completion check — the take itself already saved fine */
+  }
+
   return NextResponse.json({ take });
 }
 

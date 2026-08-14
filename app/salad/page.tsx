@@ -2,7 +2,7 @@ import Image from "next/image";
 import Link from "next/link";
 import AlbumCarousel from "./AlbumCarousel";
 import { fetchAlbumArtwork } from "@/lib/itunes";
-import { OTHER_TRACKS, TRACK } from "@/lib/track";
+import { OTHER_TRACKS, SONGS } from "@/lib/track";
 import { supabaseServer } from "@/lib/supabase-server";
 import { CANVAS_HEIGHT, CANVAS_WIDTH, cover } from "../coverUnit";
 import FruitField from "../FruitField";
@@ -42,17 +42,25 @@ async function getCompletion(songId: string): Promise<number> {
 }
 
 export default async function SaladPage() {
-  const trackCompletion = await getCompletion(TRACK.id);
-
   // Licensed-for-display artwork via Apple's iTunes Search API (lib/itunes.ts)
   // — falls back to the generated halftone pattern below if the lookup fails.
-  const coverUrl = await fetchAlbumArtwork(TRACK.artist, TRACK.title);
-  const otherCoverUrls = await Promise.all(
-    OTHER_TRACKS.map((t) => fetchAlbumArtwork(t.artist, t.title))
-  );
+  const [songCompletions, songCoverUrls, otherCoverUrls] = await Promise.all([
+    Promise.all(SONGS.map((s) => getCompletion(s.id))),
+    Promise.all(SONGS.map((s) => fetchAlbumArtwork(s.artist, s.title))),
+    Promise.all(OTHER_TRACKS.map((t) => fetchAlbumArtwork(t.artist, t.title))),
+  ]);
 
-  // TRACK sits in the middle of the shelf (not at an end) so there's
-  // something to scroll to on both sides.
+  const songTracks = SONGS.map((s, i) => ({
+    title: s.title,
+    artist: s.artist,
+    coverUrl: songCoverUrls[i],
+    completePercent: songCompletions[i], // real: recorded lines / total lines
+    singable: true,
+    slug: s.slug,
+  }));
+
+  // The singable SONGS sit in the middle of the shelf (not at an end) so
+  // there's something to scroll to on both sides.
   const otherTracks = OTHER_TRACKS.map((t, i) => ({
     title: t.title,
     artist: t.artist,
@@ -63,13 +71,7 @@ export default async function SaladPage() {
   const splitAt = Math.ceil(otherTracks.length / 2);
   const carouselTracks = [
     ...otherTracks.slice(0, splitAt),
-    {
-      title: TRACK.title,
-      artist: TRACK.artist,
-      coverUrl,
-      completePercent: trackCompletion, // real: recorded lines / total lines
-      singable: true,
-    },
+    ...songTracks,
     ...otherTracks.slice(splitAt),
   ];
   const trackIndex = splitAt;
@@ -95,6 +97,7 @@ export default async function SaladPage() {
               is muted — hardcoded per-page since each tab is its own route. */}
           <Link
             href="/salad"
+            prefetch={false}
             className="font-medium text-black dark:text-zinc-100"
             style={{ fontSize: cover(24) }}
           >
@@ -114,6 +117,7 @@ export default async function SaladPage() {
           </span>
           <Link
             href="/gallery"
+            prefetch={false}
             className="text-zinc-400 dark:text-zinc-600"
             style={{ fontSize: cover(24) }}
           >
@@ -128,10 +132,10 @@ export default async function SaladPage() {
           className="absolute left-1/2 flex -translate-x-1/2 flex-col items-center"
           style={{ top: cover(243), gap: cover(20) }}
         >
-          {/* Horizontally scrollable shelf of the whole library — TRACK
-              starts centered, the rest peek at the edges and are fully
-              hidden past that until scrolled into view. Only the centered
-              card shows its title/artist (see AlbumCarousel). */}
+          {/* Horizontally scrollable shelf of the whole library — the
+              singable SONGS start centered, the rest peek at the edges and
+              are fully hidden past that until scrolled into view. Only the
+              centered card shows its title/artist (see AlbumCarousel). */}
           <AlbumCarousel tracks={carouselTracks} initialIndex={trackIndex} />
         </div>
       </div>

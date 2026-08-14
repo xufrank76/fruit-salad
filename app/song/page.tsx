@@ -11,7 +11,7 @@ import {
   type MicCapture,
 } from "@/lib/audio";
 import { loadLyrics, type LyricLine } from "@/lib/lyrics";
-import { TRACK } from "@/lib/track";
+import { DEFAULT_SONG } from "@/lib/track";
 import LyricsPanel from "./LyricsPanel";
 
 const RECORD_SONG_GAIN = 0.35; // duck the backing track while you sing over it
@@ -81,14 +81,14 @@ export default function SongPage() {
   );
 
   useEffect(() => {
-    loadLyrics(TRACK.lyricsUrl).then(setLyrics);
+    loadLyrics(DEFAULT_SONG.lyricsUrl).then(setLyrics);
   }, []);
 
   // Resume the one global public rendition for this song: get its id and
   // which lines already have a take, so a refresh doesn't reset to empty.
   useEffect(() => {
     let cancelled = false;
-    fetch(`/api/renditions/${TRACK.id}`)
+    fetch(`/api/renditions/${DEFAULT_SONG.id}`)
       .then((res) => res.json())
       .then((data: { renditionId: string; lines: DbLine[] }) => {
         if (cancelled) return;
@@ -107,7 +107,7 @@ export default function SongPage() {
   useEffect(() => {
     let cancelled = false;
     const ctx = getAudioContext();
-    loadAudioBuffer(ctx, TRACK.audioUrl)
+    loadAudioBuffer(ctx, DEFAULT_SONG.audioUrl)
       .then((buf) => {
         if (!cancelled) songBufferRef.current = buf;
       })
@@ -279,7 +279,7 @@ export default function SongPage() {
     const ctx = getAudioContext();
     if (!songBufferRef.current) {
       try {
-        songBufferRef.current = await loadAudioBuffer(ctx, TRACK.audioUrl);
+        songBufferRef.current = await loadAudioBuffer(ctx, DEFAULT_SONG.audioUrl);
       } catch (e) {
         setMicError("Could not load the track for sync testing: " + String(e));
         return;
@@ -483,10 +483,10 @@ export default function SongPage() {
 
       <div className="text-center">
         <h1 className="text-xl font-semibold tracking-tight text-black dark:text-zinc-50">
-          {TRACK.title}
+          {DEFAULT_SONG.title}
         </h1>
         <p className="text-sm text-zinc-500 dark:text-zinc-400">
-          {TRACK.artist}
+          {DEFAULT_SONG.artist}
         </p>
       </div>
 
@@ -647,7 +647,7 @@ export default function SongPage() {
 
       <audio
         ref={audioRef}
-        src={TRACK.audioUrl}
+        src={DEFAULT_SONG.audioUrl}
         onPlay={() => setIsPlaying(true)}
         onPause={() => setIsPlaying(false)}
         onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
