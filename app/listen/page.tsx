@@ -16,6 +16,16 @@ import FruitField from "../FruitField";
 import SproutingFruits, { slotFruit, type SproutedFruit } from "../record/SproutingFruits";
 
 const RECORD_SONG_GAIN = 0.35; // duck the backing track under whichever take is sounding
+// Matches /record's own constant: ctx.outputLatency alone undershoots the
+// true record-to-playback round trip (mic input latency + acoustic lag
+// aren't exposed by the browser), so takes land a bit late without this on
+// top. /record lets singers fine-tune it by ear and persists the result per
+// device (fruitsalad:syncNudgeMs) — read that same calibration here so
+// playback stays in sync with whatever was already tuned there, rather than
+// defaulting to zero extra correction.
+const DEFAULT_SYNC_NUDGE_MS = 140;
+const SYNC_NUDGE_MIN_MS = -50;
+const SYNC_NUDGE_MAX_MS = 400;
 
 type Take = {
   id: string;
@@ -58,6 +68,7 @@ export default function ListenPage() {
   const takesGainRef = useRef<GainNode | null>(null);
   const takeBufferCacheRef = useRef<Map<string, AudioBuffer>>(new Map());
   const mutedRef = useRef(false);
+  const syncNudgeRef = useRef(DEFAULT_SYNC_NUDGE_MS);
 
   useEffect(() => {
     mutedRef.current = muted;
@@ -65,6 +76,19 @@ export default function ListenPage() {
 
   useEffect(() => {
     loadLyrics(TRACK.lyricsUrl).then(setLyrics);
+  }, []);
+
+  // Pick up whatever sync calibration was tuned on /record for this device
+  // (same localStorage key), so playback here matches instead of silently
+  // reverting to the uncorrected default.
+  useEffect(() => {
+    const saved = localStorage.getItem("fruitsalad:syncNudgeMs");
+    if (saved != null && saved !== "" && !Number.isNaN(Number(saved))) {
+      syncNudgeRef.current = Math.max(
+        SYNC_NUDGE_MIN_MS,
+        Math.min(SYNC_NUDGE_MAX_MS, Number(saved))
+      );
+    }
   }, []);
 
   useEffect(() => {
@@ -243,7 +267,7 @@ export default function ListenPage() {
       // full record-to-playback round trip late, so their voice sits that
       // much late in the buffer — shift every take earlier by that latency or
       // the layered vocals lag the backing track.
-      const vocalLatency = getOutputLatencySec(ctx);
+      const vocalLatency = getOutputLatencySec(ctx) + syncNudgeRef.current / 1000;
       const windows = takeWindows.map((w) => ({
         ...w,
         startSec: w.startSec - vocalLatency,
