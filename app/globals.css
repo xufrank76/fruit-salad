@@ -77,3 +77,40 @@ body {
 .boil-lemon { animation-name: boil-lemon; }
 .boil-orange { animation-name: boil-orange; }
 .boil-pear { animation-name: boil-pear; }
+
+/* Opt-in continuous fall + spin, used by SproutingFruits' contribution fruits
+   on the /listen page only: each fruit falls top-to-bottom in an endless loop
+   on an outer layer, while an inner layer spins clockwise or counterclockwise
+   on its own independent period — so the spin never snaps when the fall
+   loops back to its start. Every fruit shares the same total fall distance
+   (top bleed through the 1280x832 design canvas to bottom bleed) so a loop
+   always re-enters fully off-screen; the "to" value below is cover(1132)
+   computed ahead of time (see FALL_DISTANCE in SproutingFruits.tsx) since
+   that distance is identical for every fruit. */
+@keyframes fruit-fall {
+  from { transform: translateY(0); }
+  to { transform: translateY(max(88.4375vw, 136.0577vh)); }
+}
+@keyframes fruit-spin-right {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+@keyframes fruit-spin-left {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(-360deg); }
+}
+.fruit-fall {
+  animation-name: fruit-fall;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+.fruit-spin-right {
+  animation-name: fruit-spin-right;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+.fruit-spin-left {
+  animation-name: fruit-spin-left;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}

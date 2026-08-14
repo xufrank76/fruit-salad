@@ -122,31 +122,106 @@ export function slotFruit(index: number, total: number): SproutedFruit {
   };
 }
 
-export default function SproutingFruits({ fruits }: { fruits: SproutedFruit[] }) {
+// Every fruit falls the same total distance each loop — from FALL_TOP (bleed
+// above the 1280x832 design canvas) to bleed below it, 1132 total (832 canvas
+// height + 150 top bleed + 150 bottom bleed) — so the loop always re-enters
+// fully off-screen at the top. That 1132 is hardcoded as the translateY "to"
+// value in globals.css's fruit-fall keyframe (cover(1132)) since it's
+// identical for every fruit; keep the two in sync if this changes.
+const FALL_TOP = -150;
+
+// Pass `falling` to make every contribution fruit continuously fall
+// top-to-bottom in an infinite loop while spinning — only the /listen page
+// wants this ambient motion; /record keeps the fruits fixed in their grid
+// slots as a progress marker for which lines are actually filled.
+export default function SproutingFruits({
+  fruits,
+  falling = false,
+}: {
+  fruits: SproutedFruit[];
+  falling?: boolean;
+}) {
   return (
     <div className="pointer-events-none absolute inset-0 overflow-hidden">
-      {fruits.map((f) => (
-        <div
-          key={f.id}
-          className="absolute"
-          style={{
-            left: cover(f.x - f.size / 2),
-            top: cover(f.y - f.size / 2),
-            width: cover(f.size),
-            height: cover(f.size),
-            transform: `rotate(${f.rotateDeg}deg)`,
-          }}
-        >
-          {/* Separate layer for the pop-in scale so it doesn't fight the
-              wrapper's rotate or the inner boil frame-swap. */}
-          <div className="fruit-sprout h-full w-full">
+      {fruits.map((f) => {
+        if (!falling) {
+          return (
             <div
-              className={`fruit-boil h-full w-full select-none ${FRUIT_BOIL_CLASS[f.kind]}`}
-              style={{ animationDuration: `${f.boilMs}ms` }}
-            />
+              key={f.id}
+              className="absolute"
+              style={{
+                left: cover(f.x - f.size / 2),
+                top: cover(f.y - f.size / 2),
+                width: cover(f.size),
+                height: cover(f.size),
+                transform: `rotate(${f.rotateDeg}deg)`,
+              }}
+            >
+              {/* Separate layer for the pop-in scale so it doesn't fight the
+                  wrapper's rotate or the inner boil frame-swap. */}
+              <div className="fruit-sprout h-full w-full">
+                <div
+                  className={`fruit-boil h-full w-full select-none ${FRUIT_BOIL_CLASS[f.kind]}`}
+                  style={{ animationDuration: `${f.boilMs}ms` }}
+                />
+              </div>
+            </div>
+          );
+        }
+
+        // Deterministic per-fruit variety (not Math.random(), which would
+        // mismatch between server and client render): fall speed, spin speed
+        // and spin direction all vary so fruits don't move in lockstep.
+        const fallDurationSec = 18 + ((f.id * 137) % 130) / 10; // ~18-31s
+        const spinDurationSec = 20 + ((f.id * 191) % 150) / 10; // ~20-35s
+        const spinLeft = f.id % 2 === 0;
+        const spinDelaySec = -(((f.id * 233) % 300) / 10);
+
+        // Deliberately NOT f.x/f.y: those come from the grid-based slotFruit
+        // layout above, designed for /record's bottom-to-top progress marker
+        // — with few lines taken, that grid confines fruits to whichever
+        // narrow band has filled so far. The falling variant is just ambient
+        // decoration, so it spreads every fruit across the FULL canvas (both
+        // horizontally and in fall-cycle phase) regardless of how many
+        // fruits there are or how "full" the song is, seeded independently
+        // of slotFruit's own rng so the two don't correlate.
+        const spread = rngFor(f.id + 90000);
+        const spreadX = f.size / 2 + spread() * (W - f.size);
+        const fallDelaySec = -(spread() * fallDurationSec);
+
+        return (
+          <div
+            key={f.id}
+            className="absolute fruit-fall"
+            style={{
+              left: cover(spreadX - f.size / 2),
+              top: cover(FALL_TOP),
+              width: cover(f.size),
+              height: cover(f.size),
+              animationDuration: `${fallDurationSec}s`,
+              animationDelay: `${fallDelaySec}s`,
+            }}
+          >
+            {/* Each animation gets its own layer — combining classes that
+                each set the animation shorthand/longhand on one element would
+                have one clobber the other instead of playing together. */}
+            <div className="fruit-sprout h-full w-full">
+              <div
+                className={`h-full w-full ${spinLeft ? "fruit-spin-left" : "fruit-spin-right"}`}
+                style={{
+                  animationDuration: `${spinDurationSec}s`,
+                  animationDelay: `${spinDelaySec}s`,
+                }}
+              >
+                <div
+                  className={`fruit-boil h-full w-full select-none ${FRUIT_BOIL_CLASS[f.kind]}`}
+                  style={{ animationDuration: `${f.boilMs}ms` }}
+                />
+              </div>
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

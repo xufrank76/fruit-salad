@@ -357,7 +357,7 @@ export default function ListenPage() {
           <div className="opacity-10">
             <FruitField />
           </div>
-          <SproutingFruits fruits={bgFruits} />
+          <SproutingFruits fruits={bgFruits} falling />
         </div>
       </div>
 
