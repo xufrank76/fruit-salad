@@ -16,9 +16,15 @@ export default function LyricsPanel({
   recordedLines?: Set<number>;
 }) {
   const activeRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    activeRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+    const container = containerRef.current;
+    const active = activeRef.current;
+    if (!container || !active) return;
+    const target =
+      active.offsetTop - container.clientHeight / 2 + active.clientHeight / 2;
+    container.scrollTo({ top: target, behavior: "smooth" });
   }, [currentIndex]);
 
   if (lines.length === 0) {
@@ -30,7 +36,10 @@ export default function LyricsPanel({
   }
 
   return (
-    <div className="h-80 w-full max-w-md overflow-y-auto rounded-lg bg-red-950 px-3 py-8">
+    <div
+      ref={containerRef}
+      className="h-80 w-full max-w-md overflow-y-auto rounded-lg bg-red-950 px-3 py-8"
+    >
       <div className="space-y-1">
         {lines.map((line, i) => {
           const selected = selectedLines?.has(i) ?? false;
