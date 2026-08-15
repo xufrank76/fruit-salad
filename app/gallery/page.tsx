@@ -35,12 +35,14 @@ async function getCompletedRenditions(songId: string): Promise<CompletedRenditio
 
     const { data: takes } = await supabaseServer
       .from("takes")
-      .select("rendition_id, singer_name")
+      .select("rendition_id, singer_name, device_id")
       .in("rendition_id", sealed.map((r) => r.id));
     const singersByRendition = new Map<string, Set<string>>();
     for (const t of takes ?? []) {
       const set = singersByRendition.get(t.rendition_id) ?? new Set<string>();
-      set.add(t.singer_name || "Anonymous");
+      // See salad/page.tsx: dedupe anonymous takes by device_id, not the
+      // shared "Anonymous" label, so distinct unnamed singers still count.
+      set.add(t.singer_name || t.device_id || "Anonymous");
       singersByRendition.set(t.rendition_id, set);
     }
 

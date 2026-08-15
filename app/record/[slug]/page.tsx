@@ -120,6 +120,24 @@ export default function RecordPage() {
       return new Set();
     }
   });
+  // Random id persisted per browser, sent with every take so anonymous
+  // singers can still be counted as distinct contributors (see
+  // salad/gallery voice counts) instead of collapsing into one "Anonymous".
+  // Not a real identity — clearing storage or switching browsers mints a
+  // new one, and a shared device looks like a single singer.
+  const [deviceId] = useState<string>(() => {
+    if (typeof window === "undefined") return "";
+    try {
+      let id = localStorage.getItem("fruitsalad:deviceId");
+      if (!id) {
+        id = crypto.randomUUID();
+        localStorage.setItem("fruitsalad:deviceId", id);
+      }
+      return id;
+    } catch {
+      return "";
+    }
+  });
   const [singerName, setSingerName] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -1020,6 +1038,7 @@ export default function RecordPage() {
         formData.append("rendition_id", renditionId);
         formData.append("line_id", dbLine.id);
         formData.append("singer_name", name);
+        formData.append("device_id", deviceId);
         formData.append("offset_ms", String(offsetMs));
         formData.append("duration_ms", String(durationMs));
 
@@ -1081,6 +1100,7 @@ export default function RecordPage() {
     dbLines,
     lineTimes,
     singerName,
+    deviceId,
     finishSubmit,
     song,
   ]);

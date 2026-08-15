@@ -9,6 +9,7 @@ export async function POST(request: Request) {
   const renditionId = formData.get("rendition_id");
   const lineId = formData.get("line_id");
   const singerName = formData.get("singer_name");
+  const deviceId = formData.get("device_id");
   const offsetMs = formData.get("offset_ms");
   const durationMs = formData.get("duration_ms");
 
@@ -38,6 +39,7 @@ export async function POST(request: Request) {
       rendition_id: renditionId,
       line_id: lineId,
       singer_name: typeof singerName === "string" && singerName ? singerName : null,
+      device_id: typeof deviceId === "string" && deviceId ? deviceId : null,
       audio_url: publicUrl,
       offset_ms: typeof offsetMs === "string" ? Number(offsetMs) : null,
       duration_ms: typeof durationMs === "string" ? Number(durationMs) : null,

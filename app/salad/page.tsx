@@ -41,10 +41,16 @@ async function getProgress(songId: string): Promise<Progress> {
 
     const { data: takes } = await supabaseServer
       .from("takes")
-      .select("line_id, singer_name")
+      .select("line_id, singer_name, device_id")
       .eq("rendition_id", rendition.id);
     const takenLineIds = new Set((takes ?? []).map((t) => t.line_id));
-    const voices = new Set((takes ?? []).map((t) => t.singer_name || "Anonymous"));
+    // Anonymous takes are deduped by device_id (one per browser) rather than
+    // the shared "Anonymous" label, so distinct unnamed singers still count
+    // separately. Rows from before device_id existed fall back to the old
+    // shared bucket.
+    const voices = new Set(
+      (takes ?? []).map((t) => t.singer_name || t.device_id || "Anonymous")
+    );
     return {
       percent: Math.round((takenLineIds.size / total) * 100),
       voices: voices.size,
